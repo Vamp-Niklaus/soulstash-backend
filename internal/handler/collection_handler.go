@@ -455,7 +455,7 @@ func (h *CollectionHandler) GetFavorites(w http.ResponseWriter, r *http.Request)
 		handleServiceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, favs)
+	writeJSON(w, http.StatusOK, map[string]any{"favorites": favs})
 }
 
 func (h *CollectionHandler) AddFavorite(w http.ResponseWriter, r *http.Request) {
