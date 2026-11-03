@@ -49,8 +49,8 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		Port:                  port,
 		AppEnv:                appEnv,
-		MongoDBURI:            getEnv("MONGODB_URI", ""),
-		MongoDBName:           getEnv("MONGODB_DB_NAME", ""),
+		MongoDBURI:            getEnv("MONGODB_URI", getEnv("MONGO_URI", "")),
+		MongoDBName:           getEnv("MONGODB_DB_NAME", getEnv("DB_NAME", "")),
 		JWTSecret:             getEnv("JWT_SECRET", "your-super-secret-jwt-key-change-this-in-production"),
 		BrevoAPIKey:           getEnv("BREVO_API_KEY", ""),
 		TMDBBearerToken:       getEnv("TMDB_BEARER_TOKEN", ""),

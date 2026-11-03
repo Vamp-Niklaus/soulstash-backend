@@ -8,9 +8,9 @@ environment
 # Binaries and executables
 *.exe
 *.exe~
-bin/
-server
-server.exe
+/bin/
+/server
+/server.exe
 
 # Test coverage and debug artifacts
 *.out

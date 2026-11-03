@@ -32,7 +32,9 @@ func TestConfigLoadAndDefaults(t *testing.T) {
 
 func TestConfigValidationFailFast(t *testing.T) {
 	os.Unsetenv("MONGODB_URI")
+	os.Unsetenv("MONGO_URI")
 	os.Unsetenv("MONGODB_DB_NAME")
+	os.Unsetenv("DB_NAME")
 
 	cfg, err := config.Load()
 	require.NoError(t, err)

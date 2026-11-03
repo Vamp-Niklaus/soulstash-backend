@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: soulstash-backend
+    runtime: go
+    plan: free
+    region: oregon
+    buildCommand: go build -o server ./cmd/server
+    startCommand: ./server
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: MONGO_URI
+        sync: false
+      - key: DB_NAME
+        value: soulstash
+      - key: JWT_SECRET
+        generateValue: true
+      - key: TMDB_BASE_URL
+        value: https://api.tmdb.org
+      - key: TMDB_BEARER_TOKEN
+        sync: false
+      - key: OMDB_API_KEY
+        sync: false
+      - key: BREVO_API_KEY
+        sync: false
+      - key: CORS_ORIGIN
+        value: "*"
