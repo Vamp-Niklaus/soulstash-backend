@@ -41,53 +41,55 @@ func NewContentHandler(
 }
 
 func (h *ContentHandler) RegisterRoutes(r chi.Router) {
-	// OptionalAuth on all content routes
-	r.Use(middleware.OptionalAuth(h.jwtSecret))
+	r.Group(func(cr chi.Router) {
+		// OptionalAuth on all content routes
+		cr.Use(middleware.OptionalAuth(h.jwtSecret))
 
-	// Similar titles
-	r.Get("/movies/{id}/similar", h.GetSimilarMovies)
-	r.Get("/series/{id}/similar", h.GetSimilarSeries)
+		// Similar titles
+		cr.Get("/movies/{id}/similar", h.GetSimilarMovies)
+		cr.Get("/series/{id}/similar", h.GetSimilarSeries)
 
-	// TMDB collections & person images
-	r.Get("/tmdb-collection/{id}", h.GetTMDBCollection)
-	r.Get("/person/{id}/images", h.GetPersonImages)
-	r.Get("/imdb/person/{personId}/filmography", h.GetPersonFilmography)
+		// TMDB collections & person images
+		cr.Get("/tmdb-collection/{id}", h.GetTMDBCollection)
+		cr.Get("/person/{id}/images", h.GetPersonImages)
+		cr.Get("/imdb/person/{personId}/filmography", h.GetPersonFilmography)
 
-	// Discovery & Details
-	r.Get("/movies", h.DiscoverMovies)
-	r.Get("/movies/{id}", h.GetMovieDetail)
-	r.Get("/movie/{id}", h.GetMovieDetail)
-	r.Get("/movie/{id}/credits", h.GetMovieCredits)
-	r.Get("/series/{id}/credits", h.GetSeriesCredits)
-	r.Get("/series/{id}", h.GetSeriesDetail)
-	r.Get("/series/{id}/season/{seasonNumber}", h.GetSeriesSeason)
+		// Discovery & Details
+		cr.Get("/movies", h.DiscoverMovies)
+		cr.Get("/movies/{id}", h.GetMovieDetail)
+		cr.Get("/movie/{id}", h.GetMovieDetail)
+		cr.Get("/movie/{id}/credits", h.GetMovieCredits)
+		cr.Get("/series/{id}/credits", h.GetSeriesCredits)
+		cr.Get("/series/{id}", h.GetSeriesDetail)
+		cr.Get("/series/{id}/season/{seasonNumber}", h.GetSeriesSeason)
 
-	// Person Details & Credits (both singular & plural aliases)
-	r.Get("/person/{id}", h.GetPersonDetail)
-	r.Get("/people/{id}", h.GetPersonDetail)
-	r.Get("/person/{id}/credits", h.GetPersonCredits)
-	r.Get("/people/{id}/credits", h.GetPersonCredits)
+		// Person Details & Credits (both singular & plural aliases)
+		cr.Get("/person/{id}", h.GetPersonDetail)
+		cr.Get("/people/{id}", h.GetPersonDetail)
+		cr.Get("/person/{id}/credits", h.GetPersonCredits)
+		cr.Get("/people/{id}/credits", h.GetPersonCredits)
 
-	// Feeds
-	r.Get("/trending", h.GetTrending)
-	r.Get("/popular", h.GetPopular)
-	r.Get("/genres", h.GetGenres)
-	r.Get("/home", h.GetHome)
+		// Feeds
+		cr.Get("/trending", h.GetTrending)
+		cr.Get("/popular", h.GetPopular)
+		cr.Get("/genres", h.GetGenres)
+		cr.Get("/home", h.GetHome)
 
-	// Ratings
-	r.Get("/ratings", h.QueryRatings)
-	r.Get("/ratings/{mediaType}/{tmdbID}", h.GetSingleRating)
-	r.Get("/ratings/stats/counters", h.GetRatingCounters)
-	r.Post("/ratings/imdb/enrich", h.BatchEnrichImdb)
+		// Ratings
+		cr.Get("/ratings", h.QueryRatings)
+		cr.Get("/ratings/{mediaType}/{tmdbID}", h.GetSingleRating)
+		cr.Get("/ratings/stats/counters", h.GetRatingCounters)
+		cr.Post("/ratings/imdb/enrich", h.BatchEnrichImdb)
 
-	// Search
-	r.Get("/search", h.Search)
-	r.Get("/search/users", h.SearchUsers)
+		// Search
+		cr.Get("/search", h.Search)
+		cr.Get("/search/users", h.SearchUsers)
 
-	// Player sources & embed
-	r.Get("/player/sources", h.GetPlayerSources)
-	r.Get("/player/fallback", h.GetPlayerFallback)
-	r.Get("/scrape-embed", h.ScrapeEmbed)
+		// Player sources & embed
+		cr.Get("/player/sources", h.GetPlayerSources)
+		cr.Get("/player/fallback", h.GetPlayerFallback)
+		cr.Get("/scrape-embed", h.ScrapeEmbed)
+	})
 }
 
 func (h *ContentHandler) GetSimilarMovies(w http.ResponseWriter, r *http.Request) {
