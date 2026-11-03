@@ -191,7 +191,11 @@ func (r *mongoCollectionRepo) RemoveFavoritePerson(ctx context.Context, userID s
 
 	_, err := coll.UpdateOne(ctx, filter, bson.M{
 		"$pull": bson.M{
-			"favoritePeople": bson.M{"id": personID},
+			"favoritePeople": bson.M{
+				"id": bson.M{
+					"$in": []any{personID, float64(personID), int32(personID), int64(personID), fmt.Sprintf("%d", personID)},
+				},
+			},
 		},
 		"$set": bson.M{"updatedAt": time.Now()},
 	})

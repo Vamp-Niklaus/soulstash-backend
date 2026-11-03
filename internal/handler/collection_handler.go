@@ -485,15 +485,27 @@ func (h *CollectionHandler) RemoveFavorite(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	var body struct {
-		PersonID int `json:"personId"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "Person ID required")
+	var raw map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
 
-	if err := h.svc.RemoveFavorite(r.Context(), user.UserID, body.PersonID); err != nil {
+	var personID int
+	if v, ok := raw["personId"]; ok {
+		personID = int(getFloat(v))
+	}
+	if personID == 0 {
+		if v, ok := raw["id"]; ok {
+			personID = int(getFloat(v))
+		}
+	}
+	if personID == 0 {
+		writeError(w, http.StatusBadRequest, "Valid person ID required")
+		return
+	}
+
+	if err := h.svc.RemoveFavorite(r.Context(), user.UserID, personID); err != nil {
 		handleServiceError(w, err)
 		return
 	}

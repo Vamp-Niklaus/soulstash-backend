@@ -138,7 +138,11 @@ func (h *ContentHandler) DiscoverMovies(w http.ResponseWriter, r *http.Request) 
 	}
 	if genreVal != "" {
 		if strings.EqualFold(genreVal, "bollywood") {
-			params["with_original_language"] = "hi"
+			params["with_origin_country"] = "IN"
+			params["with_original_language"] = "hi|ta|te|ml|kn|bn|mr|pa"
+			if params["sort_by"] == "" {
+				params["sort_by"] = "popularity.desc"
+			}
 		} else {
 			params["with_genres"] = genreVal
 		}
@@ -273,6 +277,12 @@ func (h *ContentHandler) GetGenres(w http.ResponseWriter, r *http.Request) {
 
 	seen := make(map[float64]bool)
 	var combined []any
+
+	// Prepend Bollywood virtual genre (like React SPA)
+	combined = append(combined, map[string]any{
+		"id":   "bollywood",
+		"name": "Bollywood",
+	})
 
 	if movieData != nil {
 		if genres, ok := movieData["genres"].([]any); ok {
