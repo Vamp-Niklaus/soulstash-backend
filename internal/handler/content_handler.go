@@ -131,6 +131,21 @@ func (h *ContentHandler) DiscoverMovies(w http.ResponseWriter, r *http.Request) 
 		endpoint = "/3/discover/tv"
 	}
 
+	// Map genre or genreId to TMDB discover parameters
+	genreVal := params["genre"]
+	if genreVal == "" {
+		genreVal = params["genreId"]
+	}
+	if genreVal != "" {
+		if strings.EqualFold(genreVal, "bollywood") {
+			params["with_original_language"] = "hi"
+		} else {
+			params["with_genres"] = genreVal
+		}
+		delete(params, "genre")
+		delete(params, "genreId")
+	}
+
 	data, err := h.tmdbClient.Get(r.Context(), endpoint, params)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed to fetch from TMDB")

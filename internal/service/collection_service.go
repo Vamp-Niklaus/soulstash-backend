@@ -458,6 +458,9 @@ func (s *collectionService) GetPublicProfile(ctx context.Context, currentUsernam
 		"user": map[string]any{
 			"username":             targetUser.Username,
 			"fullName":             targetUser.FullName,
+			"firstName":            targetUser.FirstName,
+			"lastName":             targetUser.LastName,
+			"dateOfBirth":          targetUser.DateOfBirth,
 			"avatar":               targetUser.Avatar,
 			"bio":                  targetUser.Bio,
 			"instagramHandle":      targetUser.InstagramHandle,
