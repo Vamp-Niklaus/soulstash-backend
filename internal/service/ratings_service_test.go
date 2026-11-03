@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -9,6 +11,7 @@ import (
 )
 
 type mockRatingsRepo struct {
+	mu      sync.RWMutex
 	ratings map[string]*domain.RatingRecord
 	metrics *domain.AppMetrics
 }
@@ -24,7 +27,9 @@ func newMockRatingsRepo() *mockRatingsRepo {
 }
 
 func (m *mockRatingsRepo) FindRating(ctx context.Context, tmdbID int, mediaType string) (*domain.RatingRecord, error) {
-	key := string(rune(tmdbID)) + "_" + mediaType
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	key := fmt.Sprintf("%d_%s", tmdbID, mediaType)
 	if r, ok := m.ratings[key]; ok {
 		return r, nil
 	}
@@ -32,7 +37,9 @@ func (m *mockRatingsRepo) FindRating(ctx context.Context, tmdbID int, mediaType 
 }
 
 func (m *mockRatingsRepo) UpsertRating(ctx context.Context, rating *domain.RatingRecord) error {
-	key := string(rune(rating.TmdbID)) + "_" + rating.MediaType
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := fmt.Sprintf("%d_%s", rating.TmdbID, rating.MediaType)
 	m.ratings[key] = rating
 	return nil
 }
@@ -51,7 +58,7 @@ func TestRatingsService_ImdbSentinelFiltering(t *testing.T) {
 
 	// 1. Pre-populate cache with 10.0 sentinel (Node bug/quirk)
 	sentinel := 10.0
-	repo.ratings[string(rune(101))+"_Movie"] = &domain.RatingRecord{
+	repo.ratings["101_Movie"] = &domain.RatingRecord{
 		TmdbID:     101,
 		MediaType:  "Movie",
 		Type:       "Movie",
@@ -73,7 +80,7 @@ func TestRatingsService_ImdbSentinelFiltering(t *testing.T) {
 
 	// 2. Pre-populate cache with real rating 8.5
 	realRating := 8.5
-	repo.ratings[string(rune(202))+"_Movie"] = &domain.RatingRecord{
+	repo.ratings["202_Movie"] = &domain.RatingRecord{
 		TmdbID:     202,
 		MediaType:  "Movie",
 		Type:       "Movie",

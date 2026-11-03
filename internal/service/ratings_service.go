@@ -142,23 +142,28 @@ func (s *ratingsService) BatchEnrich(ctx context.Context, items []map[string]any
 	ch := make(chan result, len(items))
 	for i, itm := range items {
 		go func(index int, item map[string]any) {
-			tmdbID := int(getFloat(item["id"]))
+			cloned := make(map[string]any, len(item)+3)
+			for k, v := range item {
+				cloned[k] = v
+			}
+
+			tmdbID := int(getFloat(cloned["id"]))
 			if tmdbID == 0 {
-				tmdbID = int(getFloat(item["tmdbID"]))
+				tmdbID = int(getFloat(cloned["tmdbID"]))
 			}
-			mediaType, _ := item["mediaType"].(string)
+			mediaType, _ := cloned["mediaType"].(string)
 			if mediaType == "" {
-				mediaType, _ = item["media_type"].(string)
+				mediaType, _ = cloned["media_type"].(string)
 			}
-			imdbID, _ := item["imdb_id"].(string)
+			imdbID, _ := cloned["imdb_id"].(string)
 
 			res, err := s.ResolveRating(ctx, tmdbID, mediaType, imdbID, nil)
 			if err == nil && res != nil {
-				item["imdb_rating"] = res.ImdbRating
-				item["imdb_id"] = res.ImdbID
-				item["rating_lookup_attempted"] = true
+				cloned["imdb_rating"] = res.ImdbRating
+				cloned["imdb_id"] = res.ImdbID
+				cloned["rating_lookup_attempted"] = true
 			}
-			ch <- result{idx: index, item: item}
+			ch <- result{idx: index, item: cloned}
 		}(i, itm)
 	}
 
