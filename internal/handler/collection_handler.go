@@ -430,7 +430,31 @@ func (h *CollectionHandler) GetFollowers(w http.ResponseWriter, r *http.Request)
 		handleServiceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, followers)
+	var users []map[string]any
+	for _, uname := range followers {
+		u, _ := h.svc.GetPublicProfile(r.Context(), "", uname)
+		if u != nil {
+			if userMap, ok := u["user"].(map[string]any); ok {
+				users = append(users, map[string]any{
+					"username": uname,
+					"fullName": userMap["fullName"],
+					"avatar":   userMap["avatar"],
+					"bio":      userMap["bio"],
+				})
+				continue
+			}
+		}
+		users = append(users, map[string]any{
+			"username": uname,
+			"fullName": uname,
+			"avatar":   "",
+			"bio":      "",
+		})
+	}
+	if users == nil {
+		users = []map[string]any{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"users": users})
 }
 
 func (h *CollectionHandler) GetFollowing(w http.ResponseWriter, r *http.Request) {
@@ -440,7 +464,31 @@ func (h *CollectionHandler) GetFollowing(w http.ResponseWriter, r *http.Request)
 		handleServiceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, following)
+	var users []map[string]any
+	for _, uname := range following {
+		u, _ := h.svc.GetPublicProfile(r.Context(), "", uname)
+		if u != nil {
+			if userMap, ok := u["user"].(map[string]any); ok {
+				users = append(users, map[string]any{
+					"username": uname,
+					"fullName": userMap["fullName"],
+					"avatar":   userMap["avatar"],
+					"bio":      userMap["bio"],
+				})
+				continue
+			}
+		}
+		users = append(users, map[string]any{
+			"username": uname,
+			"fullName": uname,
+			"avatar":   "",
+			"bio":      "",
+		})
+	}
+	if users == nil {
+		users = []map[string]any{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"users": users})
 }
 
 func (h *CollectionHandler) GetFavorites(w http.ResponseWriter, r *http.Request) {
