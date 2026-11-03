@@ -58,6 +58,7 @@ func (h *ContentHandler) RegisterRoutes(r chi.Router) {
 		cr.Get("/movies", h.DiscoverMovies)
 		cr.Get("/movies/{id}", h.GetMovieDetail)
 		cr.Get("/movie/{id}", h.GetMovieDetail)
+		cr.Get("/movies/{id}/credits", h.GetMovieCredits)
 		cr.Get("/movie/{id}/credits", h.GetMovieCredits)
 		cr.Get("/series/{id}/credits", h.GetSeriesCredits)
 		cr.Get("/series/{id}", h.GetSeriesDetail)
@@ -344,16 +345,36 @@ func (h *ContentHandler) BatchEnrichImdb(w http.ResponseWriter, r *http.Request)
 
 func (h *ContentHandler) Search(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query().Get("query")
+	if query == "" {
+		query = r.URL.Query().Get("q")
+	}
 	if strings.TrimSpace(query) == "" {
 		writeJSON(w, http.StatusOK, map[string]any{"results": []any{}})
 		return
 	}
 
+	searchType := r.URL.Query().Get("type")
+	if searchType == "users" {
+		h.SearchUsers(w, r)
+		return
+	}
+
+	pageStr := r.URL.Query().Get("page")
+	if pageStr == "" {
+		pageStr = "1"
+	}
+
+	endpoint := "/3/search/multi"
+	if searchType == "cast" || searchType == "person" {
+		endpoint = "/3/search/person"
+	}
+
 	params := map[string]string{
 		"query":         query,
 		"include_adult": "false",
+		"page":          pageStr,
 	}
-	data, err := h.tmdbClient.Get(r.Context(), "/3/search/multi", params)
+	data, err := h.tmdbClient.Get(r.Context(), endpoint, params)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Search error")
 		return
@@ -361,6 +382,11 @@ func (h *ContentHandler) Search(w http.ResponseWriter, r *http.Request) {
 
 	results, _ := data["results"].([]any)
 	yearQuery, _ := strconv.Atoi(r.URL.Query().Get("year"))
+
+	if searchType == "cast" || searchType == "person" {
+		writeJSON(w, http.StatusOK, map[string]any{"results": results})
+		return
+	}
 
 	type scoredItem struct {
 		item  map[string]any

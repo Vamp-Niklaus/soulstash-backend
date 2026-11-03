@@ -127,6 +127,23 @@ func (s *Server) setupRoutes(deps *HandlerDeps) {
 			})
 		})
 
+		// Mount Auth routes under /api/auth
+		if deps != nil && deps.AuthHandler != nil {
+			r.Route("/auth", func(authR chi.Router) {
+				deps.AuthHandler.RegisterRoutes(authR)
+			})
+		}
+
+		// Mount Unified /api/user routes (Auth + Collections) with zero shadowing
+		r.Route("/user", func(userR chi.Router) {
+			if deps != nil && deps.AuthHandler != nil {
+				deps.AuthHandler.RegisterRoutes(userR)
+			}
+			if deps != nil && deps.CollectionHandler != nil {
+				deps.CollectionHandler.RegisterUserRoutes(userR)
+			}
+		})
+
 		// Mount Content and Collection routes
 		if deps != nil {
 			if deps.CollectionHandler != nil {
@@ -137,18 +154,6 @@ func (s *Server) setupRoutes(deps *HandlerDeps) {
 			}
 		}
 	})
-
-	// Mount Auth routes under both /api/auth AND /api/user for exact Node parity
-	if deps != nil && deps.AuthHandler != nil {
-		s.router.Route("/api/auth", func(r chi.Router) {
-			r.Use(rateLimiter.Handler)
-			deps.AuthHandler.RegisterRoutes(r)
-		})
-		s.router.Route("/api/user", func(r chi.Router) {
-			r.Use(rateLimiter.Handler)
-			deps.AuthHandler.RegisterRoutes(r)
-		})
-	}
 
 	// Mount Admin routes under /api/admin
 	if deps != nil && deps.AdminHandler != nil {

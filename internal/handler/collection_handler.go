@@ -59,6 +59,39 @@ func (h *CollectionHandler) RegisterRoutes(r chi.Router) {
 	})
 }
 
+// RegisterUserRoutes mounts routes directly onto a /user subrouter
+func (h *CollectionHandler) RegisterUserRoutes(userR chi.Router) {
+	userR.Group(func(protected chi.Router) {
+		protected.Use(middleware.AuthenticateToken(h.jwtSecret))
+
+		protected.Get("/collections", h.GetUserCollections)
+		protected.Post("/collections", h.CreateCollection)
+		protected.Put("/collections/{id}", h.UpdateCollection)
+		protected.Delete("/collections/{id}", h.DeleteCollection)
+		protected.Post("/collections/{id}/add", h.AddToCollection)
+		protected.Post("/collections/{id}/remove", h.RemoveFromCollection)
+		protected.Get("/collections/{id}/movies", h.GetCollectionMovies)
+		protected.Post("/collections/{id}/publish", h.PublishCollection)
+		protected.Post("/collections/reorder", h.ReorderCollections)
+		protected.Post("/collections/{id}/enrich-metadata", h.EnrichMetadata)
+
+		// Social & favorites
+		protected.Post("/follow", h.Follow)
+		protected.Post("/unfollow", h.Unfollow)
+		protected.Get("/favorites", h.GetFavorites)
+		protected.Post("/favorites/add", h.AddFavorite)
+		protected.Post("/favorites/remove", h.RemoveFavorite)
+		protected.Post("/favorites/privacy", h.SetFavoritesPrivacy)
+	})
+
+	userR.Group(func(public chi.Router) {
+		public.Use(middleware.OptionalAuth(h.jwtSecret))
+		public.Get("/profile/{username}", h.GetPublicProfile)
+		public.Get("/{username}/followers", h.GetFollowers)
+		public.Get("/{username}/following", h.GetFollowing)
+	})
+}
+
 func (h *CollectionHandler) GetUserCollections(w http.ResponseWriter, r *http.Request) {
 	user := middleware.GetUserFromContext(r.Context())
 	if user == nil {
