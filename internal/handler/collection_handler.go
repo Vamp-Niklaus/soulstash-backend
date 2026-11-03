@@ -233,6 +233,7 @@ func (h *CollectionHandler) RemoveFromCollection(w http.ResponseWriter, r *http.
 		MovieID  any `json:"movieId"`
 		SeriesID any `json:"seriesId"`
 		ID       any `json:"id"`
+		MediaID  any `json:"mediaId"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
@@ -242,6 +243,9 @@ func (h *CollectionHandler) RemoveFromCollection(w http.ResponseWriter, r *http.
 	}
 	if targetID == nil {
 		targetID = body.ID
+	}
+	if targetID == nil {
+		targetID = body.MediaID
 	}
 
 	clientVer := getClientCollectionVersion(r)

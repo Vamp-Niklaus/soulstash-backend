@@ -269,9 +269,15 @@ func (s *authService) UpdateProfile(ctx context.Context, userID string, update P
 		user.Avatar = update.Avatar
 	}
 
+	fullName := strings.TrimSpace(user.FirstName + " " + user.LastName)
+	if fullName != "" {
+		user.FullName = fullName
+	}
+
 	updateMap := map[string]any{
 		"firstName":       user.FirstName,
 		"lastName":        user.LastName,
+		"fullName":        user.FullName,
 		"dateOfBirth":     user.DateOfBirth,
 		"bio":             user.Bio,
 		"instagramHandle": user.InstagramHandle,

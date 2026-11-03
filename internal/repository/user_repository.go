@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"soulstash/internal/domain"
@@ -135,7 +136,19 @@ func (r *mongoUserRepo) Update(ctx context.Context, id string, update bson.M) er
 		filter["username"] = id
 	}
 
-	res, err := coll.UpdateOne(ctx, filter, update)
+	updateDoc := update
+	hasOperator := false
+	for k := range update {
+		if strings.HasPrefix(k, "$") {
+			hasOperator = true
+			break
+		}
+	}
+	if !hasOperator {
+		updateDoc = bson.M{"$set": update}
+	}
+
+	res, err := coll.UpdateOne(ctx, filter, updateDoc)
 	if err != nil {
 		return fmt.Errorf("user update error: %w", err)
 	}

@@ -3,9 +3,11 @@ package service
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
+	"go.mongodb.org/mongo-driver/v2/bson"
 	"soulstash/internal/domain"
 	"soulstash/internal/repository"
 )
@@ -281,24 +283,14 @@ func (s *collectionService) RemoveMovie(ctx context.Context, userID, collectionI
 		return nil, domain.NewAppError(domain.ErrNotFound, "Collection not found", 404)
 	}
 
-	targetStr := fmt.Sprintf("%v", contentID)
+	targetStr := normalizeID(contentID)
 	var filtered []any
 	for _, m := range user.Collections[idx].Movies {
-		mMap, ok := m.(map[string]any)
-		if !ok {
-			filtered = append(filtered, m)
-			continue
+		mid := extractMovieID(m)
+		if mid != "" && mid == targetStr {
+			continue // removed!
 		}
-		idVal := mMap["movieId"]
-		if idVal == nil {
-			idVal = mMap["seriesId"]
-		}
-		if idVal == nil {
-			idVal = mMap["id"]
-		}
-		if fmt.Sprintf("%v", idVal) != targetStr {
-			filtered = append(filtered, m)
-		}
+		filtered = append(filtered, m)
 	}
 
 	user.Collections[idx].Movies = filtered
@@ -588,12 +580,76 @@ func (s *collectionService) DetectAnime(ctx context.Context, items []map[string]
 }
 
 func findCollectionIndex(collections []domain.UserCollection, identifier string) int {
+	cleanID := strings.TrimSpace(identifier)
 	for i, c := range collections {
-		if fmt.Sprintf("%v", c.ID) == identifier || strings.EqualFold(c.Name, identifier) {
+		if strings.EqualFold(c.Name, cleanID) {
 			return i
+		}
+		if c.ID != nil {
+			switch vid := c.ID.(type) {
+			case bson.ObjectID:
+				if vid.Hex() == cleanID {
+					return i
+				}
+			case string:
+				if vid == cleanID {
+					return i
+				}
+			default:
+				if fmt.Sprintf("%v", vid) == cleanID {
+					return i
+				}
+			}
 		}
 	}
 	return -1
+}
+
+func extractMovieID(m any) string {
+	switch v := m.(type) {
+	case map[string]any:
+		for _, k := range []string{"movieId", "seriesId", "id", "mediaId", "tmdbId"} {
+			if val, exists := v[k]; exists && val != nil {
+				return normalizeID(val)
+			}
+		}
+	case bson.M:
+		for _, k := range []string{"movieId", "seriesId", "id", "mediaId", "tmdbId"} {
+			if val, exists := v[k]; exists && val != nil {
+				return normalizeID(val)
+			}
+		}
+	case bson.D:
+		for _, elem := range v {
+			for _, k := range []string{"movieId", "seriesId", "id", "mediaId", "tmdbId"} {
+				if strings.EqualFold(elem.Key, k) && elem.Value != nil {
+					return normalizeID(elem.Value)
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func normalizeID(val any) string {
+	switch v := val.(type) {
+	case float64:
+		return strconv.FormatInt(int64(v), 10)
+	case float32:
+		return strconv.FormatInt(int64(v), 10)
+	case int:
+		return strconv.Itoa(v)
+	case int32:
+		return strconv.FormatInt(int64(v), 10)
+	case int64:
+		return strconv.FormatInt(v, 10)
+	case string:
+		return strings.TrimSpace(v)
+	case bson.ObjectID:
+		return v.Hex()
+	default:
+		return strings.TrimSpace(fmt.Sprintf("%v", v))
+	}
 }
 
 func sanitizeCollections(cols []domain.UserCollection) []domain.UserCollection {
