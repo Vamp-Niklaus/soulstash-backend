@@ -611,25 +611,37 @@ func findCollectionIndex(collections []domain.UserCollection, identifier string)
 func extractMovieID(m any) string {
 	switch v := m.(type) {
 	case map[string]any:
-		for _, k := range []string{"movieId", "seriesId", "id", "mediaId", "tmdbId"} {
-			if val, exists := v[k]; exists && val != nil {
-				return normalizeID(val)
+		for k, val := range v {
+			lk := strings.ToLower(k)
+			if lk == "movieid" || lk == "seriesid" || lk == "id" || lk == "mediaid" || lk == "tmdbid" ||
+				lk == "movie_id" || lk == "series_id" || lk == "media_id" || lk == "tmdb_id" || lk == "contentid" || lk == "content_id" {
+				if val != nil {
+					return normalizeID(val)
+				}
 			}
 		}
 	case bson.M:
-		for _, k := range []string{"movieId", "seriesId", "id", "mediaId", "tmdbId"} {
-			if val, exists := v[k]; exists && val != nil {
-				return normalizeID(val)
+		for k, val := range v {
+			lk := strings.ToLower(k)
+			if lk == "movieid" || lk == "seriesid" || lk == "id" || lk == "mediaid" || lk == "tmdbid" ||
+				lk == "movie_id" || lk == "series_id" || lk == "media_id" || lk == "tmdb_id" || lk == "contentid" || lk == "content_id" {
+				if val != nil {
+					return normalizeID(val)
+				}
 			}
 		}
 	case bson.D:
 		for _, elem := range v {
-			for _, k := range []string{"movieId", "seriesId", "id", "mediaId", "tmdbId"} {
-				if strings.EqualFold(elem.Key, k) && elem.Value != nil {
+			lk := strings.ToLower(elem.Key)
+			if lk == "movieid" || lk == "seriesid" || lk == "id" || lk == "mediaid" || lk == "tmdbid" ||
+				lk == "movie_id" || lk == "series_id" || lk == "media_id" || lk == "tmdb_id" || lk == "contentid" || lk == "content_id" {
+				if elem.Value != nil {
 					return normalizeID(elem.Value)
 				}
 			}
 		}
+	case float64, float32, int, int32, int64, string:
+		return normalizeID(v)
 	}
 	return ""
 }
