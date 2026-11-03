@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:7.0
+    container_name: soulstash-mongo-dev
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_DATABASE: soulstash
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: soulstash-backend-dev
+    restart: unless-stopped
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: 3000
+      APP_ENV: development
+      MONGODB_URI: mongodb://mongodb:27017
+      MONGODB_DB_NAME: soulstash
+      JWT_SECRET: dev-secret-key-change-in-production-minimum-32-chars
+      VITE_DEV_SERVER_ORIGIN: http://localhost:5173
+
+volumes:
+  mongo_data:

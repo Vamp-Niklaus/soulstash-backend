@@ -1,0 +1,107 @@
+package service
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"soulstash/internal/domain"
+)
+
+type mockRatingsRepo struct {
+	ratings map[string]*domain.RatingRecord
+	metrics *domain.AppMetrics
+}
+
+func newMockRatingsRepo() *mockRatingsRepo {
+	return &mockRatingsRepo{
+		ratings: make(map[string]*domain.RatingRecord),
+		metrics: &domain.AppMetrics{
+			TmdbDetailFetchCount: 10,
+			OmdbFetchCount:       5,
+		},
+	}
+}
+
+func (m *mockRatingsRepo) FindRating(ctx context.Context, tmdbID int, mediaType string) (*domain.RatingRecord, error) {
+	key := string(rune(tmdbID)) + "_" + mediaType
+	if r, ok := m.ratings[key]; ok {
+		return r, nil
+	}
+	return nil, nil
+}
+
+func (m *mockRatingsRepo) UpsertRating(ctx context.Context, rating *domain.RatingRecord) error {
+	key := string(rune(rating.TmdbID)) + "_" + rating.MediaType
+	m.ratings[key] = rating
+	return nil
+}
+
+func (m *mockRatingsRepo) IncrementMetric(ctx context.Context, metricKey string) error {
+	return nil
+}
+
+func (m *mockRatingsRepo) GetMetrics(ctx context.Context) (*domain.AppMetrics, error) {
+	return m.metrics, nil
+}
+
+func TestRatingsService_ImdbSentinelFiltering(t *testing.T) {
+	repo := newMockRatingsRepo()
+	svc := NewRatingsService(repo, nil, "")
+
+	// 1. Pre-populate cache with 10.0 sentinel (Node bug/quirk)
+	sentinel := 10.0
+	repo.ratings[string(rune(101))+"_Movie"] = &domain.RatingRecord{
+		TmdbID:     101,
+		MediaType:  "Movie",
+		Type:       "Movie",
+		ImdbID:     "tt101101",
+		ImdbRating: &sentinel,
+		UpdatedAt:  time.Now(),
+	}
+
+	res, err := svc.ResolveRating(context.Background(), 101, "Movie", "", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.ImdbRating != nil {
+		t.Errorf("expected ImdbRating to be filtered to nil for 10.0 sentinel, got %v", *res.ImdbRating)
+	}
+	if res.Source != "cache" {
+		t.Errorf("expected Source 'cache', got %v", res.Source)
+	}
+
+	// 2. Pre-populate cache with real rating 8.5
+	realRating := 8.5
+	repo.ratings[string(rune(202))+"_Movie"] = &domain.RatingRecord{
+		TmdbID:     202,
+		MediaType:  "Movie",
+		Type:       "Movie",
+		ImdbID:     "tt202202",
+		ImdbRating: &realRating,
+		UpdatedAt:  time.Now(),
+	}
+
+	res2, err := svc.ResolveRating(context.Background(), 202, "Movie", "", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res2.ImdbRating == nil || *res2.ImdbRating != 8.5 {
+		t.Errorf("expected ImdbRating 8.5, got %v", res2.ImdbRating)
+	}
+}
+
+func TestRatingsService_BatchEnrich(t *testing.T) {
+	repo := newMockRatingsRepo()
+	svc := NewRatingsService(repo, nil, "")
+
+	items := []map[string]any{
+		{"id": 101, "media_type": "Movie", "title": "Movie One"},
+		{"id": 202, "media_type": "Series", "name": "Series Two"},
+	}
+
+	enriched := svc.BatchEnrich(context.Background(), items)
+	if len(enriched) != 2 {
+		t.Fatalf("expected 2 enriched items, got %d", len(enriched))
+	}
+}

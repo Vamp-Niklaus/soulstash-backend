@@ -1,0 +1,29 @@
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  enable:
+    - errcheck
+    - gosimple
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gosec
+    - bodyclose
+    - unconvert
+    - misspell
+
+linters-settings:
+  govet:
+    enable-all: true
+  gosec:
+    excludes:
+      - G101 # Allow test mock credentials or placeholder constants
+      - G104 # Explicitly handled in wrapper contexts
+
+issues:
+  exclude-dirs:
+    - testdata
+    - vendor

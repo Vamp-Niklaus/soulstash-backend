@@ -1,0 +1,210 @@
+openapi: 3.0.3
+info:
+  title: Soulstash Backend API
+  description: High-performance Go backend API for Soulstash streaming and collections platform.
+  version: 1.1.0
+
+servers:
+  - url: http://localhost:3000
+    description: Local development server
+  - url: https://soulstash.onrender.com
+    description: Production server
+
+paths:
+  /api/health:
+    get:
+      summary: Health check
+      responses:
+        '200':
+          description: Service health status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "OK"
+                  timestamp:
+                    type: string
+                    example: "2026-11-03T05:28:13.000Z"
+
+  /image/{path}:
+    get:
+      summary: Image URL resolver
+      parameters:
+        - name: path
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Resolved TMDB image URL
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  imageUrl:
+                    type: string
+                    example: "https://image.tmdb.org/t/p/w500/sample.jpg"
+
+  /api/auth/check-username:
+    get:
+      summary: Check username availability
+      parameters:
+        - name: username
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Availability response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  available:
+                    type: boolean
+                  message:
+                    type: string
+
+  /api/auth/register:
+    post:
+      summary: Register a new user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password, fullName]
+              properties:
+                username:
+                  type: string
+                password:
+                  type: string
+                fullName:
+                  type: string
+      responses:
+        '201':
+          description: Account created successfully
+        '400':
+          description: Validation error
+        '409':
+          description: Username already exists
+
+  /api/auth/login:
+    post:
+      summary: Login user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username:
+                  type: string
+                password:
+                  type: string
+      responses:
+        '200':
+          description: Login successful with JWT
+        '401':
+          description: Invalid credentials
+
+  /api/auth/logout:
+    post:
+      summary: Logout
+      responses:
+        '200':
+          description: Logout successful
+
+  /api/auth/verify-token:
+    post:
+      summary: Verify access token
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Token is valid
+        '401':
+          description: Access token required
+        '403':
+          description: Invalid or expired token
+
+  /api/user/collections:
+    get:
+      summary: Get user collections
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of user collections
+          headers:
+            X-Collection-Version:
+              schema:
+                type: string
+    post:
+      summary: Create new custom collection
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                description:
+                  type: string
+                isPublic:
+                  type: boolean
+      responses:
+        '201':
+          description: Collection created
+
+  /api/trending:
+    get:
+      summary: Get trending content
+      parameters:
+        - name: time_window
+          in: query
+          schema:
+            type: string
+            enum: [day, week]
+      responses:
+        '200':
+          description: Trending media items
+
+  /api/search:
+    get:
+      summary: Multi-search media items
+      parameters:
+        - name: query
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: year
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Scored search results
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

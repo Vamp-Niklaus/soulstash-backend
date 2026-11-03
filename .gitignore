@@ -1,0 +1,31 @@
+# Environment files
+.env
+.env.*
+.env2
+environment
+!.env.example
+
+# Binaries and executables
+*.exe
+*.exe~
+bin/
+server
+server.exe
+
+# Test coverage and debug artifacts
+*.out
+coverage.out
+profile.out
+
+# IDE and OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Temporary or cache files
+tmp/
+dist/
+build/
