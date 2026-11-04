@@ -320,6 +320,10 @@ func discoverItems(data map[string]any, mediaType string, adminMode int, adultEn
 		if !ok {
 			continue
 		}
+		posterPath, _ := item["poster_path"].(string)
+		if strings.TrimSpace(posterPath) == "" {
+			continue
+		}
 		if bollywood && adminMode == 2 {
 			item["adult"] = true
 			item["_isAdultDiscover"] = true
@@ -511,7 +515,77 @@ func (h *ContentHandler) GetPopular(w http.ResponseWriter, r *http.Request) {
 		h.fetchProxy(w, r, "/3/tv/popular")
 		return
 	}
-	h.fetchProxy(w, r, "/3/movie/popular")
+
+	// Keep the response shape and filters aligned with the Node /popular route.
+	page := parsePositiveInt(r.URL.Query().Get("page"), 1)
+	limit := parsePositiveInt(r.URL.Query().Get("limit"), 20)
+	if limit > 100 {
+		limit = 100
+	}
+	targetCount := limit
+	if page == 1 && targetCount < 14 {
+		targetCount = 14
+	}
+	adminMode := h.searchAdminMode(r)
+	today := time.Now().UTC().Format("2006-01-02")
+	items := make([]map[string]any, 0, targetCount)
+	totalPages, totalResults := 1, 0
+	currentPage := page
+
+	for attempts := 0; len(items) < targetCount && attempts < 5; attempts++ {
+		params := map[string]string{
+			"language":                "en-US",
+			"page":                    strconv.Itoa(currentPage),
+			"include_adult":           strconv.FormatBool(adminMode == 2),
+			"sort_by":                 "popularity.desc",
+			"primary_release_date.lte": today,
+		}
+		data, err := h.tmdbClient.Get(r.Context(), "/3/discover/movie", params)
+		if err != nil {
+			if len(items) == 0 {
+				writeError(w, http.StatusBadGateway, "Failed to fetch popular content")
+				return
+			}
+			break
+		}
+
+		if adminMode == 2 {
+			if results, ok := data["results"].([]any); ok {
+				for _, raw := range results {
+					if item, ok := raw.(map[string]any); ok {
+						item["adult"] = true
+						item["_isAdultDiscover"] = true
+					}
+				}
+			}
+		}
+		pageItems := withoutAnimeItems(discoverItems(data, "Movie", adminMode, h.adultEngine, false))
+		items = uniquePopularItems(append(items, pageItems...))
+		totalPages = max(totalPages, int(getFloat(data["total_pages"])))
+		totalResults = max(totalResults, int(getFloat(data["total_results"])))
+
+		results, _ := data["results"].([]any)
+		if currentPage >= totalPages || len(results) == 0 {
+			break
+		}
+		currentPage++
+	}
+
+	if len(items) > targetCount {
+		items = items[:targetCount]
+	}
+	safeTotalPages := totalPages
+	if safeTotalPages <= 1 {
+		safeTotalPages = 500
+	}
+	safeTotalPages = max(safeTotalPages, page+10)
+	totalResults = max(totalResults, safeTotalPages*limit)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"movies": items,
+		"pagination": map[string]int{
+			"page": page, "limit": limit, "total": totalResults, "pages": safeTotalPages,
+		},
+	})
 }
 
 func (h *ContentHandler) GetGenres(w http.ResponseWriter, r *http.Request) {
