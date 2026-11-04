@@ -103,17 +103,127 @@ func (h *ContentHandler) RegisterRoutes(r chi.Router) {
 
 func (h *ContentHandler) GetSimilarMovies(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	h.fetchProxy(w, r, fmt.Sprintf("/3/movie/%s/similar", id))
+	h.getSimilarContent(w, r, id, "movie")
 }
 
 func (h *ContentHandler) GetSimilarSeries(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	h.fetchProxy(w, r, fmt.Sprintf("/3/tv/%s/similar", id))
+	h.getSimilarContent(w, r, id, "tv")
+}
+
+func (h *ContentHandler) getSimilarContent(w http.ResponseWriter, r *http.Request, id, mediaType string) {
+	page := parsePositiveInt(r.URL.Query().Get("page"), 1)
+	parentEndpoint := fmt.Sprintf("/3/movie/%s", id)
+	if mediaType == "tv" {
+		parentEndpoint = fmt.Sprintf("/3/tv/%s", id)
+	}
+	adminMode := h.searchAdminMode(r)
+	if parent, err := h.tmdbClient.Get(r.Context(), parentEndpoint, map[string]string{"language": "en-US"}); err == nil && parent != nil {
+		if !searchItemVisible(parent, adminMode, h.adultEngine) || h.hasSuppressedCollectionPart(r, parent, adminMode) {
+			writeJSON(w, http.StatusOK, emptySimilarResponse(page))
+			return
+		}
+	}
+
+	baseEndpoint := fmt.Sprintf("/3/movie/%s/similar", id)
+	if mediaType == "tv" {
+		baseEndpoint = fmt.Sprintf("/3/tv/%s/similar", id)
+	}
+	var firstPage map[string]any
+	filtered := make([]any, 0, 10)
+	seen := make(map[string]struct{})
+	for currentPage := page; len(filtered) < 10 && currentPage <= page+4; currentPage++ {
+		data, err := h.tmdbClient.Get(r.Context(), baseEndpoint, map[string]string{
+			"page": strconv.Itoa(currentPage), "language": "en-US",
+		})
+		if err != nil || data == nil {
+			if firstPage == nil {
+				writeJSON(w, http.StatusOK, emptySimilarResponse(page))
+				return
+			}
+			break
+		}
+		if firstPage == nil {
+			firstPage = data
+		}
+		results, _ := data["results"].([]any)
+		for _, raw := range results {
+			item, ok := raw.(map[string]any)
+			if !ok || getFloat(item["id"]) == 0 || !searchItemVisible(item, adminMode, h.adultEngine) {
+				continue
+			}
+			itemID := fmt.Sprint(item["id"])
+			if itemID == id {
+				continue
+			}
+			if _, exists := seen[itemID]; exists {
+				continue
+			}
+			seen[itemID] = struct{}{}
+			filtered = append(filtered, item)
+		}
+		if currentPage >= int(getFloat(data["total_pages"])) {
+			break
+		}
+	}
+	if firstPage == nil {
+		writeJSON(w, http.StatusOK, emptySimilarResponse(page))
+		return
+	}
+	firstPage["results"] = filtered
+	firstPage["page"] = page
+	writeJSON(w, http.StatusOK, firstPage)
+}
+
+func emptySimilarResponse(page int) map[string]any {
+	return map[string]any{"page": page, "results": []any{}, "total_pages": 0, "total_results": 0}
+}
+
+func (h *ContentHandler) hasSuppressedCollectionPart(r *http.Request, parent map[string]any, adminMode int) bool {
+	collection, _ := parent["belongs_to_collection"].(map[string]any)
+	if collection == nil || getFloat(collection["id"]) <= 0 {
+		return false
+	}
+	collectionID := fmt.Sprint(collection["id"])
+	data, err := h.tmdbClient.Get(r.Context(), fmt.Sprintf("/3/collection/%s", collectionID), map[string]string{"language": "en-US"})
+	if err != nil || data == nil {
+		return false
+	}
+	parts, _ := data["parts"].([]any)
+	for _, raw := range parts {
+		part, ok := raw.(map[string]any)
+		if ok && !searchItemVisible(part, adminMode, h.adultEngine) {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *ContentHandler) GetTMDBCollection(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	h.fetchProxy(w, r, fmt.Sprintf("/3/collection/%s", id))
+	data, err := h.tmdbClient.Get(r.Context(), fmt.Sprintf("/3/collection/%s", id), requestQueryParams(r))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "Collection not found")
+		return
+	}
+	adminMode := h.searchAdminMode(r)
+	parts, _ := data["parts"].([]any)
+	filtered := make([]any, 0, len(parts))
+	for _, raw := range parts {
+		part, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if !searchItemVisible(part, adminMode, h.adultEngine) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "Collection not found"})
+			return
+		}
+		filtered = append(filtered, part)
+	}
+	if parts != nil {
+		data["parts"] = filtered
+	}
+	writeJSON(w, http.StatusOK, data)
 }
 
 func (h *ContentHandler) GetPersonImages(w http.ResponseWriter, r *http.Request) {
@@ -428,6 +538,7 @@ func (h *ContentHandler) GetMovieDetail(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusNotFound, "Movie not found")
 		return
 	}
+	h.filterDetailRelatedContent(r, data, true)
 
 	// Attach resolved IMDb rating
 	tmdbID, _ := strconv.Atoi(id)
@@ -469,6 +580,7 @@ func (h *ContentHandler) GetSeriesDetail(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusNotFound, "Series not found")
 		return
 	}
+	h.filterDetailRelatedContent(r, data, false)
 
 	tmdbID, _ := strconv.Atoi(id)
 	var imdbID string
@@ -493,12 +605,26 @@ func (h *ContentHandler) GetSeriesSeason(w http.ResponseWriter, r *http.Request)
 func (h *ContentHandler) GetPersonDetail(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	params := map[string]string{"append_to_response": "combined_credits,images"}
-	h.fetchProxyWithParams(w, r, fmt.Sprintf("/3/person/%s", id), params)
+	data, err := h.tmdbClient.Get(r.Context(), fmt.Sprintf("/3/person/%s", id), params)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "Person not found")
+		return
+	}
+	if credits, ok := data["combined_credits"].(map[string]any); ok {
+		h.filterPersonCredits(credits, h.searchAdminMode(r))
+	}
+	writeJSON(w, http.StatusOK, data)
 }
 
 func (h *ContentHandler) GetPersonCredits(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	h.fetchProxy(w, r, fmt.Sprintf("/3/person/%s/combined_credits", id))
+	data, err := h.tmdbClient.Get(r.Context(), fmt.Sprintf("/3/person/%s/combined_credits", id), requestQueryParams(r))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "Person credits not found")
+		return
+	}
+	h.filterPersonCredits(data, h.searchAdminMode(r))
+	writeJSON(w, http.StatusOK, data)
 }
 
 func (h *ContentHandler) GetTrending(w http.ResponseWriter, r *http.Request) {
@@ -506,7 +632,13 @@ func (h *ContentHandler) GetTrending(w http.ResponseWriter, r *http.Request) {
 	if timeWindow == "" {
 		timeWindow = "day"
 	}
-	h.fetchProxy(w, r, fmt.Sprintf("/3/trending/all/%s", timeWindow))
+	data, err := h.tmdbClient.Get(r.Context(), fmt.Sprintf("/3/trending/all/%s", timeWindow), requestQueryParams(r))
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "Failed to fetch trending content")
+		return
+	}
+	h.filterContentResults(data, h.searchAdminMode(r))
+	writeJSON(w, http.StatusOK, data)
 }
 
 func (h *ContentHandler) GetPopular(w http.ResponseWriter, r *http.Request) {
@@ -536,10 +668,10 @@ func (h *ContentHandler) GetPopular(w http.ResponseWriter, r *http.Request) {
 
 	for attempts := 0; len(items) < targetCount && attempts < 5; attempts++ {
 		movieParams := map[string]string{
-			"language":                "en-US",
-			"page":                    strconv.Itoa(currentPage),
-			"include_adult":           strconv.FormatBool(adminMode == 2),
-			"sort_by":                 "popularity.desc",
+			"language":                 "en-US",
+			"page":                     strconv.Itoa(currentPage),
+			"include_adult":            strconv.FormatBool(adminMode == 2),
+			"sort_by":                  "popularity.desc",
 			"primary_release_date.lte": today,
 		}
 		seriesParams := cloneStringMap(movieParams)
@@ -617,10 +749,10 @@ func (h *ContentHandler) GetPopular(w http.ResponseWriter, r *http.Request) {
 	safeTotalPages = max(safeTotalPages, page+10)
 	totalResults = max(totalResults, safeTotalPages*limit)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"movies": items,
-		"results": items,
-		"page": page,
-		"total_pages": safeTotalPages,
+		"movies":        items,
+		"results":       items,
+		"page":          page,
+		"total_pages":   safeTotalPages,
 		"total_results": totalResults,
 		"pagination": map[string]int{
 			"page": page, "limit": limit, "total": totalResults, "pages": safeTotalPages,
@@ -675,6 +807,10 @@ func (h *ContentHandler) GetHome(w http.ResponseWriter, r *http.Request) {
 	popularMovies, _ := h.tmdbClient.Get(r.Context(), "/3/movie/popular", nil)
 	popularSeries, _ := h.tmdbClient.Get(r.Context(), "/3/tv/popular", nil)
 
+	adminMode := h.searchAdminMode(r)
+	h.filterContentResults(trending, adminMode)
+	h.filterContentResults(popularMovies, adminMode)
+	h.filterContentResults(popularSeries, adminMode)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"trending":      trending,
 		"popularMovies": popularMovies,
@@ -1033,6 +1169,111 @@ func searchItemVisible(item map[string]any, adminMode int, adultEngine *service.
 		return adult
 	}
 	return !adult
+}
+
+func (h *ContentHandler) filterContentResults(payload map[string]any, adminMode int) {
+	if payload == nil {
+		return
+	}
+	results, ok := payload["results"].([]any)
+	if !ok {
+		return
+	}
+	filtered := make([]any, 0, len(results))
+	for _, raw := range results {
+		item, ok := raw.(map[string]any)
+		if ok && searchItemVisible(item, adminMode, h.adultEngine) {
+			filtered = append(filtered, item)
+		}
+	}
+	payload["results"] = filtered
+}
+
+func (h *ContentHandler) filterPersonCredits(payload map[string]any, adminMode int) {
+	if payload == nil {
+		return
+	}
+	for _, key := range []string{"cast", "crew"} {
+		credits, ok := payload[key].([]any)
+		if !ok {
+			continue
+		}
+		filtered := make([]any, 0, len(credits))
+		for _, raw := range credits {
+			item, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			mediaType, _ := item["media_type"].(string)
+			if mediaType != "movie" && mediaType != "tv" {
+				continue
+			}
+			if !searchItemVisible(item, adminMode, h.adultEngine) {
+				continue
+			}
+			imdbID, _ := item["imdb_id"].(string)
+			if getFloat(item["vote_count"]) <= 0 && strings.TrimSpace(imdbID) == "" {
+				continue
+			}
+			releaseDate, _ := item["release_date"].(string)
+			if releaseDate == "" {
+				releaseDate, _ = item["first_air_date"].(string)
+			}
+			if strings.TrimSpace(releaseDate) == "" {
+				continue
+			}
+			filtered = append(filtered, item)
+		}
+		payload[key] = filtered
+	}
+}
+
+func (h *ContentHandler) filterDetailRelatedContent(r *http.Request, detail map[string]any, movie bool) {
+	if detail == nil {
+		return
+	}
+	adminMode := h.searchAdminMode(r)
+	parentSuppressed := !searchItemVisible(detail, adminMode, h.adultEngine)
+	collectionSuppressed := movie && h.hasSuppressedCollectionPart(r, detail, adminMode)
+	if parentSuppressed || collectionSuppressed {
+		if movie {
+			if _, exists := detail["belongs_to_collection"]; exists {
+				detail["belongs_to_collection"] = nil
+			}
+		}
+		for _, key := range []string{"similar", "recommendations"} {
+			if related, ok := detail[key].(map[string]any); ok {
+				detail[key] = emptiedRelatedResults(related)
+			}
+		}
+		return
+	}
+	for _, key := range []string{"similar", "recommendations"} {
+		if related, ok := detail[key].(map[string]any); ok {
+			h.filterContentResults(related, adminMode)
+		}
+	}
+}
+
+func emptiedRelatedResults(related map[string]any) map[string]any {
+	filtered := make(map[string]any, len(related)+1)
+	for key, value := range related {
+		filtered[key] = value
+	}
+	filtered["results"] = []any{}
+	filtered["total_pages"] = 0
+	filtered["total_results"] = 0
+	return filtered
+}
+
+func requestQueryParams(r *http.Request) map[string]string {
+	params := make(map[string]string)
+	for key, values := range r.URL.Query() {
+		if len(values) > 0 {
+			params[key] = values[0]
+		}
+	}
+	return params
 }
 
 func searchItemIsIndian(item map[string]any) bool {
