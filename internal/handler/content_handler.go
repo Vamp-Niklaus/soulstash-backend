@@ -516,7 +516,8 @@ func (h *ContentHandler) GetPopular(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Keep the response shape and filters aligned with the Node /popular route.
+	// Keep the response shape and filters aligned with the Node /popular route,
+	// while combining the movie and TV discovery feeds into one popular list.
 	page := parsePositiveInt(r.URL.Query().Get("page"), 1)
 	limit := parsePositiveInt(r.URL.Query().Get("limit"), 20)
 	if limit > 100 {
@@ -529,19 +530,37 @@ func (h *ContentHandler) GetPopular(w http.ResponseWriter, r *http.Request) {
 	adminMode := h.searchAdminMode(r)
 	today := time.Now().UTC().Format("2006-01-02")
 	items := make([]map[string]any, 0, targetCount)
-	totalPages, totalResults := 1, 0
+	moviePages, seriesPages := 1, 1
+	movieTotal, seriesTotal := 0, 0
 	currentPage := page
 
 	for attempts := 0; len(items) < targetCount && attempts < 5; attempts++ {
-		params := map[string]string{
+		movieParams := map[string]string{
 			"language":                "en-US",
 			"page":                    strconv.Itoa(currentPage),
 			"include_adult":           strconv.FormatBool(adminMode == 2),
 			"sort_by":                 "popularity.desc",
 			"primary_release_date.lte": today,
 		}
-		data, err := h.tmdbClient.Get(r.Context(), "/3/discover/movie", params)
-		if err != nil {
+		seriesParams := cloneStringMap(movieParams)
+		delete(seriesParams, "primary_release_date.lte")
+		seriesParams["first_air_date.lte"] = today
+
+		var movieData, seriesData map[string]any
+		var movieErr, seriesErr error
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			movieData, movieErr = h.tmdbClient.Get(r.Context(), "/3/discover/movie", movieParams)
+		}()
+		go func() {
+			defer wg.Done()
+			seriesData, seriesErr = h.tmdbClient.Get(r.Context(), "/3/discover/tv", seriesParams)
+		}()
+		wg.Wait()
+
+		if movieErr != nil && seriesErr != nil {
 			if len(items) == 0 {
 				writeError(w, http.StatusBadGateway, "Failed to fetch popular content")
 				return
@@ -549,23 +568,38 @@ func (h *ContentHandler) GetPopular(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
-		if adminMode == 2 {
-			if results, ok := data["results"].([]any); ok {
-				for _, raw := range results {
-					if item, ok := raw.(map[string]any); ok {
-						item["adult"] = true
-						item["_isAdultDiscover"] = true
-					}
+		markAdultDiscoverResults := func(data map[string]any) {
+			if adminMode != 2 || data == nil {
+				return
+			}
+			results, _ := data["results"].([]any)
+			for _, raw := range results {
+				if item, ok := raw.(map[string]any); ok {
+					item["adult"] = true
+					item["_isAdultDiscover"] = true
 				}
 			}
 		}
-		pageItems := withoutAnimeItems(discoverItems(data, "Movie", adminMode, h.adultEngine, false))
-		items = uniquePopularItems(append(items, pageItems...))
-		totalPages = max(totalPages, int(getFloat(data["total_pages"])))
-		totalResults = max(totalResults, int(getFloat(data["total_results"])))
+		markAdultDiscoverResults(movieData)
+		markAdultDiscoverResults(seriesData)
 
-		results, _ := data["results"].([]any)
-		if currentPage >= totalPages || len(results) == 0 {
+		pageItems := make([]map[string]any, 0, targetCount)
+		if movieErr == nil {
+			pageItems = append(pageItems, discoverItems(movieData, "Movie", adminMode, h.adultEngine, false)...)
+			moviePages = max(moviePages, int(getFloat(movieData["total_pages"])))
+			movieTotal = max(movieTotal, int(getFloat(movieData["total_results"])))
+		}
+		if seriesErr == nil {
+			pageItems = append(pageItems, discoverItems(seriesData, "Series", adminMode, h.adultEngine, false)...)
+			seriesPages = max(seriesPages, int(getFloat(seriesData["total_pages"])))
+			seriesTotal = max(seriesTotal, int(getFloat(seriesData["total_results"])))
+		}
+		pageItems = withoutAnimeItems(pageItems)
+		items = uniquePopularItems(append(items, pageItems...))
+
+		movieResults, _ := movieData["results"].([]any)
+		seriesResults, _ := seriesData["results"].([]any)
+		if (currentPage >= max(moviePages, seriesPages)) || (len(movieResults) == 0 && len(seriesResults) == 0) {
 			break
 		}
 		currentPage++
@@ -574,6 +608,8 @@ func (h *ContentHandler) GetPopular(w http.ResponseWriter, r *http.Request) {
 	if len(items) > targetCount {
 		items = items[:targetCount]
 	}
+	totalPages := max(moviePages, seriesPages)
+	totalResults := movieTotal + seriesTotal
 	safeTotalPages := totalPages
 	if safeTotalPages <= 1 {
 		safeTotalPages = 500
@@ -582,6 +618,10 @@ func (h *ContentHandler) GetPopular(w http.ResponseWriter, r *http.Request) {
 	totalResults = max(totalResults, safeTotalPages*limit)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"movies": items,
+		"results": items,
+		"page": page,
+		"total_pages": safeTotalPages,
+		"total_results": totalResults,
 		"pagination": map[string]int{
 			"page": page, "limit": limit, "total": totalResults, "pages": safeTotalPages,
 		},
