@@ -58,6 +58,10 @@ func (h *ContentHandler) RegisterRoutes(r chi.Router) {
 		cr.Get("/movies", h.DiscoverMovies)
 		cr.Get("/movies/{id}", h.GetMovieDetail)
 		cr.Get("/movie/{id}", h.GetMovieDetail)
+		cr.Get("/movies/{id}/images", h.GetMovieImages)
+		cr.Get("/movie/{id}/images", h.GetMovieImages)
+		cr.Get("/series/{id}/images", h.GetSeriesImages)
+		cr.Get("/tv/{id}/images", h.GetSeriesImages)
 		cr.Get("/movies/{id}/credits", h.GetMovieCredits)
 		cr.Get("/movie/{id}/credits", h.GetMovieCredits)
 		cr.Get("/series/{id}/credits", h.GetSeriesCredits)
@@ -184,7 +188,7 @@ func (h *ContentHandler) DiscoverMovies(w http.ResponseWriter, r *http.Request) 
 
 func (h *ContentHandler) GetMovieDetail(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	params := map[string]string{"append_to_response": "videos,credits,recommendations"}
+	params := map[string]string{"append_to_response": "videos,credits,recommendations,images", "include_image_language": "en,null"}
 	data, err := h.tmdbClient.Get(r.Context(), fmt.Sprintf("/3/movie/%s", id), params)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "Movie not found")
@@ -208,6 +212,16 @@ func (h *ContentHandler) GetMovieCredits(w http.ResponseWriter, r *http.Request)
 	h.fetchProxy(w, r, fmt.Sprintf("/3/movie/%s/credits", id))
 }
 
+func (h *ContentHandler) GetMovieImages(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	h.fetchProxy(w, r, fmt.Sprintf("/3/movie/%s/images?include_image_language=en,null", id))
+}
+
+func (h *ContentHandler) GetSeriesImages(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	h.fetchProxy(w, r, fmt.Sprintf("/3/tv/%s/images?include_image_language=en,null", id))
+}
+
 func (h *ContentHandler) GetSeriesCredits(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	h.fetchProxy(w, r, fmt.Sprintf("/3/tv/%s/credits", id))
@@ -215,7 +229,7 @@ func (h *ContentHandler) GetSeriesCredits(w http.ResponseWriter, r *http.Request
 
 func (h *ContentHandler) GetSeriesDetail(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	params := map[string]string{"append_to_response": "videos,credits,recommendations,external_ids"}
+	params := map[string]string{"append_to_response": "videos,credits,recommendations,external_ids,images", "include_image_language": "en,null"}
 	data, err := h.tmdbClient.Get(r.Context(), fmt.Sprintf("/3/tv/%s", id), params)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "Series not found")
