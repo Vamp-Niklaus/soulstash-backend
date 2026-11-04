@@ -488,9 +488,63 @@ func (h *ContentHandler) SearchUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *ContentHandler) GetPlayerSources(w http.ResponseWriter, r *http.Request) {
-	// Return empty or player sources structure
+	tmdbID := r.URL.Query().Get("tmdbId")
+	mediaType := r.URL.Query().Get("mediaType")
+
+	var sources []map[string]any
+
+	if tmdbID != "" {
+		endpoint := fmt.Sprintf("/movie/%s/videos", tmdbID)
+		if mediaType == "series" || mediaType == "tv" {
+			endpoint = fmt.Sprintf("/tv/%s/videos", tmdbID)
+		}
+
+		raw, err := h.tmdbClient.GetRaw(r.Context(), endpoint, nil)
+		if err == nil {
+			var vidResp struct {
+				Results []struct {
+					Key  string `json:"key"`
+					Site string `json:"site"`
+					Type string `json:"type"`
+				} `json:"results"`
+			}
+			if err := json.Unmarshal(raw, &vidResp); err == nil {
+				var trailerKey string
+				for _, v := range vidResp.Results {
+					if v.Site == "YouTube" && v.Type == "Trailer" {
+						trailerKey = v.Key
+						break
+					}
+				}
+				if trailerKey == "" {
+					for _, v := range vidResp.Results {
+						if v.Site == "YouTube" {
+							trailerKey = v.Key
+							break
+						}
+					}
+				}
+				if trailerKey != "" {
+					ytUrl := fmt.Sprintf("https://www.youtube-nocookie.com/embed/%s", trailerKey)
+					sources = append(sources, map[string]any{
+						"id":         "youtube",
+						"key":        "youtube",
+						"label":      "YouTube",
+						"url":        ytUrl,
+						"urls":       []string{ytUrl},
+						"embeddable": true,
+					})
+				}
+			}
+		}
+	}
+
+	if sources == nil {
+		sources = []map[string]any{}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"sources":   map[string]any{},
+		"sources":   sources,
 		"downloads": []any{},
 	})
 }
