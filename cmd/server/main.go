@@ -95,7 +95,10 @@ func main() {
 	// Handlers
 	authHandler := handler.NewAuthHandler(authSvc, cfg.JWTSecret)
 	collectionHandler := handler.NewCollectionHandler(collectionSvc, cfg.JWTSecret)
-	contentHandler := handler.NewContentHandler(tmdbClient, ratingsSvc, adultEngine, userRepo, cfg.JWTSecret)
+	contentHandler := handler.NewContentHandler(tmdbClient, ratingsSvc, adultEngine, userRepo, cfg.JWTSecret, cfg.WatchmodeAPIKey)
+	if mongoClient != nil {
+		contentHandler.SetDatabase(mongoClient.Database())
+	}
 	pagesHandler := handler.NewPagesHandler(cfg.IsProduction)
 
 	var adminHandler *handler.AdminHandler

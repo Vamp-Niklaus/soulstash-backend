@@ -3,7 +3,11 @@ package handler
 import (
 	"encoding/json"
 	"fmt"
+	"html"
+	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
@@ -12,19 +16,28 @@ import (
 	"time"
 
 	"soulstash/internal/middleware"
+	"soulstash/internal/platform/mongodb"
 	"soulstash/internal/platform/tmdb"
 	"soulstash/internal/repository"
 	"soulstash/internal/service"
 
 	"github.com/go-chi/chi/v5"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 )
 
 type ContentHandler struct {
-	tmdbClient  tmdb.Client
-	ratingsSvc  service.RatingsService
-	adultEngine *service.AdultDecisionEngine
-	userRepo    repository.UserRepository
-	jwtSecret   string
+	tmdbClient      tmdb.Client
+	ratingsSvc      service.RatingsService
+	adultEngine     *service.AdultDecisionEngine
+	userRepo        repository.UserRepository
+	jwtSecret       string
+	watchmodeAPIKey string
+	db              *mongo.Database
+}
+
+func (h *ContentHandler) SetDatabase(db *mongo.Database) {
+	h.db = db
 }
 
 func NewContentHandler(
@@ -33,13 +46,19 @@ func NewContentHandler(
 	adultEngine *service.AdultDecisionEngine,
 	userRepo repository.UserRepository,
 	jwtSecret string,
+	watchmodeAPIKey ...string,
 ) *ContentHandler {
+	watchmodeKey := ""
+	if len(watchmodeAPIKey) > 0 {
+		watchmodeKey = strings.TrimSpace(watchmodeAPIKey[0])
+	}
 	return &ContentHandler{
-		tmdbClient:  tmdbClient,
-		ratingsSvc:  ratingsSvc,
-		adultEngine: adultEngine,
-		userRepo:    userRepo,
-		jwtSecret:   jwtSecret,
+		tmdbClient:      tmdbClient,
+		ratingsSvc:      ratingsSvc,
+		adultEngine:     adultEngine,
+		userRepo:        userRepo,
+		jwtSecret:       jwtSecret,
+		watchmodeAPIKey: watchmodeKey,
 	}
 }
 
@@ -232,8 +251,124 @@ func (h *ContentHandler) GetPersonImages(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *ContentHandler) GetPersonFilmography(w http.ResponseWriter, r *http.Request) {
-	// Return empty list or filmography if scraped
-	writeJSON(w, http.StatusOK, []any{})
+	personID := chi.URLParam(r, "personId")
+	if !regexp.MustCompile(`^nm\d+$`).MatchString(personID) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid IMDb person ID"})
+		return
+	}
+	items, err := scrapeIMDbFilmography(r, personID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "Failed to scrape IMDB filmography", "details": err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+type htmlListItem struct {
+	start int
+	end   int
+}
+
+var (
+	imdbTitleAnchorRE = regexp.MustCompile(`(?is)<a\b[^>]*href=["']((?:https?://(?:www\.)?imdb\.com)?/title/(tt\d+)/?[^"']*)["'][^>]*>(.*?)</a>`)
+	htmlTagRE         = regexp.MustCompile(`(?is)<[^>]+>`)
+	htmlListTokenRE   = regexp.MustCompile(`(?is)<li\b[^>]*>|</li\s*>`)
+	htmlYearRE        = regexp.MustCompile(`\b(?:19|20)\d{2}\b`)
+	imdbRatingRE      = regexp.MustCompile(`(?is)class=["'][^"']*ipc-rating-star--rating[^"']*["'][^>]*>(.*?)</`)
+	floatRE           = regexp.MustCompile(`\d+(?:\.\d+)?`)
+)
+
+func scrapeIMDbFilmography(r *http.Request, personID string) ([]map[string]any, error) {
+	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, "https://www.imdb.com/name/"+personID+"/", nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36")
+	request.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	response, err := (&http.Client{Timeout: 30 * time.Second}).Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("IMDb returned HTTP %d", response.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, 12<<20))
+	if err != nil {
+		return nil, err
+	}
+	return parseIMDbFilmography(string(body)), nil
+}
+
+func parseIMDbFilmography(document string) []map[string]any {
+	containers := make([]htmlListItem, 0)
+	stack := make([]htmlListItem, 0)
+	for _, token := range htmlListTokenRE.FindAllStringIndex(document, -1) {
+		tag := strings.ToLower(document[token[0]:token[1]])
+		if strings.HasPrefix(tag, "</li") {
+			if len(stack) == 0 {
+				continue
+			}
+			item := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			item.end = token[1]
+			openingEnd := strings.IndexByte(document[item.start:item.end], '>')
+			if openingEnd >= 0 {
+				opening := strings.ToLower(document[item.start : item.start+openingEnd+1])
+				if strings.Contains(opening, "ipc-metadata-list-summary-item") && strings.Contains(opening, "data-testid") {
+					containers = append(containers, item)
+				}
+			}
+			continue
+		}
+		stack = append(stack, htmlListItem{start: token[0]})
+	}
+
+	items := make([]map[string]any, 0)
+	for _, anchor := range imdbTitleAnchorRE.FindAllStringSubmatchIndex(document, -1) {
+		if len(anchor) < 8 {
+			continue
+		}
+		title := normalizeIMDbText(document[anchor[6]:anchor[7]])
+		imdbID := document[anchor[4]:anchor[5]]
+		if title == "" {
+			continue
+		}
+		var fragment string
+		for _, container := range containers {
+			if anchor[0] >= container.start && anchor[0] < container.end {
+				fragment = document[container.start:container.end]
+				break
+			}
+		}
+		if fragment == "" {
+			continue
+		}
+
+		item := map[string]any{"title": title, "year": nil, "imdb_rating": nil, "imdb_id": imdbID}
+		plain := normalizeIMDbText(fragment)
+		if year := htmlYearRE.FindString(plain); year != "" {
+			if value, err := strconv.Atoi(year); err == nil {
+				item["year"] = value
+			}
+		}
+		if ratingMatch := imdbRatingRE.FindStringSubmatch(fragment); len(ratingMatch) > 1 {
+			if rating := floatRE.FindString(normalizeIMDbText(ratingMatch[1])); rating != "" {
+				if value, err := strconv.ParseFloat(rating, 64); err == nil {
+					item["imdb_rating"] = value
+				}
+			}
+		}
+		items = append(items, item)
+	}
+	return items
+}
+
+func normalizeIMDbText(value string) string {
+	value = html.UnescapeString(htmlTagRE.ReplaceAllString(value, " "))
+	return strings.Join(strings.Fields(value), " ")
 }
 
 func (h *ContentHandler) DiscoverMovies(w http.ResponseWriter, r *http.Request) {
@@ -642,9 +777,15 @@ func (h *ContentHandler) GetTrending(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *ContentHandler) GetPopular(w http.ResponseWriter, r *http.Request) {
-	mediaType := r.URL.Query().Get("type")
+	mediaType := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("type")))
 	if mediaType == "tv" || mediaType == "series" {
-		h.fetchProxy(w, r, "/3/tv/popular")
+		data, err := h.tmdbClient.Get(r.Context(), "/3/tv/popular", requestQueryParams(r))
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "Failed to fetch popular content")
+			return
+		}
+		h.filterContentResults(data, h.searchAdminMode(r))
+		writeJSON(w, http.StatusOK, data)
 		return
 	}
 
@@ -1349,22 +1490,66 @@ func nullString(value string) any {
 }
 
 func (h *ContentHandler) GetPlayerSources(w http.ResponseWriter, r *http.Request) {
-	tmdbID := r.URL.Query().Get("tmdbId")
-	mediaType := r.URL.Query().Get("mediaType")
+	tmdbID := strings.TrimSpace(r.URL.Query().Get("tmdbId"))
+	parsedID, err := strconv.ParseInt(tmdbID, 10, 64)
+	if err != nil || parsedID <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "tmdbId is required."})
+		return
+	}
+	mediaType := "series"
+	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("mediaType")), "movie") {
+		mediaType = "movie"
+	}
+	season, episode := 0, 0
+	if mediaType == "series" {
+		season = parsePositiveInt(r.URL.Query().Get("seasonNumber"), 1)
+		episode = parsePositiveInt(r.URL.Query().Get("episodeNumber"), 1)
+	}
 
-	var sources []map[string]any
+	var record map[string]any
+	if h.db != nil {
+		var stored bson.M
+		if err := h.db.Collection(mongodb.CollectionPlayerSources).FindOne(r.Context(), bson.M{
+			"tmdbId": parsedID, "mediaType": mediaType,
+		}).Decode(&stored); err == nil {
+			record = map[string]any(stored)
+		}
+	}
 
-	if tmdbID != "" {
-		isSeries := strings.EqualFold(mediaType, "series") || strings.EqualFold(mediaType, "tv")
-		endpoints := []string{}
-		if isSeries {
-			season := parsePositiveInt(r.URL.Query().Get("seasonNumber"), 0)
-			episode := parsePositiveInt(r.URL.Query().Get("episodeNumber"), 0)
-			if season > 0 && episode > 0 {
-				endpoints = append(endpoints, fmt.Sprintf("/3/tv/%s/season/%d/episode/%d/videos", tmdbID, season, episode))
-				if season != 1 || episode != 1 {
-					endpoints = append(endpoints, fmt.Sprintf("/3/tv/%s/season/1/episode/1/videos", tmdbID))
-				}
+	sourceRecord := record
+	if mediaType == "series" {
+		episodes := asContentMap(record["episodes"])
+		if episodeRecord := asContentMap(episodes[fmt.Sprintf("s%de%d", season, episode)]); episodeRecord != nil {
+			sourceRecord = episodeRecord
+		}
+	}
+	providerMap := asContentMap(sourceRecord["sources"])
+	sources := make([]map[string]any, 0)
+	knownProviders := map[string]struct{}{}
+	preferredProviders := []string{"smwh", "rpmshre", "upnshr", "strmp2", "flls"}
+	for index, key := range preferredProviders {
+		knownProviders[key] = struct{}{}
+		urls := sanitizePlayerProviderURLs(providerMap[key])
+		if len(urls) == 0 {
+			continue
+		}
+		sources = append(sources, map[string]any{
+			"id": key, "key": key, "label": fmt.Sprintf("H%d", index+1),
+			"urls": urls, "url": urls[0], "embeddable": true,
+		})
+	}
+
+	var youtubeURL string
+	if urls := sanitizePlayerProviderURLs(providerMap["youtube"]); len(urls) > 0 {
+		youtubeURL = urls[0]
+	}
+	knownProviders["youtube"] = struct{}{}
+	if youtubeURL == "" {
+		endpoints := make([]string, 0, 3)
+		if mediaType == "series" {
+			endpoints = append(endpoints, fmt.Sprintf("/3/tv/%s/season/%d/episode/%d/videos", tmdbID, season, episode))
+			if season != 1 || episode != 1 {
+				endpoints = append(endpoints, fmt.Sprintf("/3/tv/%s/season/1/episode/1/videos", tmdbID))
 			}
 			endpoints = append(endpoints, fmt.Sprintf("/3/tv/%s/videos", tmdbID))
 		} else {
@@ -1402,35 +1587,374 @@ func (h *ContentHandler) GetPlayerSources(w http.ResponseWriter, r *http.Request
 			}
 		}
 		if trailerKey != "" {
-			ytURL := fmt.Sprintf("https://www.youtube-nocookie.com/embed/%s", trailerKey)
+			youtubeURL = fmt.Sprintf("https://www.youtube-nocookie.com/embed/%s", trailerKey)
+		}
+	}
+	if youtubeURL != "" {
+		sources = append(sources, map[string]any{
+			"id": "youtube", "key": "youtube", "label": "YouTube",
+			"url": youtubeURL, "urls": []string{youtubeURL}, "embeddable": true,
+		})
+	}
+
+	dynamicKeys := make([]string, 0, len(providerMap))
+	for key := range providerMap {
+		if _, exists := knownProviders[key]; !exists {
+			dynamicKeys = append(dynamicKeys, key)
+		}
+	}
+	sort.Strings(dynamicKeys)
+	for _, key := range dynamicKeys {
+		urls := sanitizePlayerProviderURLs(providerMap[key])
+		if len(urls) > 0 {
 			sources = append(sources, map[string]any{
-				"id": "youtube", "key": "youtube", "label": "YouTube",
-				"url": ytURL, "urls": []string{ytURL}, "embeddable": true,
+				"id": key, "key": key, "label": key, "urls": urls, "url": urls[0], "embeddable": true,
 			})
 		}
 	}
 
-	if sources == nil {
-		sources = []map[string]any{}
+	downloads := contentStringList(sourceRecord["downloads"])
+	searchKey, _ := record["searchKey"].(string)
+	imdbID := strings.TrimSpace(r.URL.Query().Get("imdbId"))
+	if imdbID == "" {
+		imdbID, _ = record["imdbId"].(string)
 	}
-
+	updatedAt := sourceRecord["updatedAt"]
+	if updatedAt == nil {
+		updatedAt = record["updatedAt"]
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"sources":   sources,
-		"downloads": []any{},
+		"searchKey": searchKey, "tmdbId": parsedID, "imdbId": imdbID, "mediaType": mediaType,
+		"seasonNumber": nullablePlayerNumber(season), "episodeNumber": nullablePlayerNumber(episode),
+		"updatedAt": updatedAt, "scraping": false, "notAvailable": record["notAvailable"] == true,
+		"downloads": downloads, "sources": sources,
 	})
+}
+
+func asContentMap(value any) map[string]any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return typed
+	case bson.M:
+		return map[string]any(typed)
+	default:
+		return map[string]any{}
+	}
+}
+
+func contentStringList(value any) []string {
+	var values []any
+	switch typed := value.(type) {
+	case []any:
+		values = typed
+	case bson.A:
+		values = []any(typed)
+	case []string:
+		return typed
+	default:
+		return []string{}
+	}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
+			result = append(result, strings.TrimSpace(text))
+		}
+	}
+	return result
+}
+
+func sanitizePlayerProviderURLs(value any) []string {
+	urls := contentStringList(value)
+	if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
+		urls = []string{strings.TrimSpace(text)}
+	}
+	result := make([]string, 0, len(urls))
+	seen := make(map[string]struct{})
+	for _, raw := range urls {
+		parsed, err := url.Parse(raw)
+		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			continue
+		}
+		path := strings.ToLower(parsed.EscapedPath())
+		if !regexp.MustCompile(`/((e|embed|v|svid|evid|file|files)/)`).MatchString(path) && !strings.HasSuffix(path, ".html") && parsed.RawQuery == "" && parsed.Fragment == "" {
+			continue
+		}
+		if _, exists := seen[raw]; exists {
+			continue
+		}
+		seen[raw] = struct{}{}
+		result = append(result, raw)
+	}
+	return result
+}
+
+func nullablePlayerNumber(value int) any {
+	if value <= 0 {
+		return nil
+	}
+	return value
 }
 
 func (h *ContentHandler) GetPlayerFallback(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"sources": []any{},
-	})
+	mediaType := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("mediaType")))
+	tmdbID, parseErr := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("tmdbId")), 10, 64)
+	if (mediaType != "movie" && mediaType != "series") || parseErr != nil || tmdbID <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "mediaType and tmdbId are required."})
+		return
+	}
+	if h.watchmodeAPIKey == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Watchmode fallback is not configured."})
+		return
+	}
+	result, err := h.resolveWatchmodeFallback(r, tmdbID, strings.TrimSpace(r.URL.Query().Get("imdbId")), mediaType)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to resolve player fallback", "details": err.Error()})
+		return
+	}
+	if result == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "No Watchmode fallback found for this title."})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (h *ContentHandler) ScrapeEmbed(w http.ResponseWriter, r *http.Request) {
-	urlParam := r.URL.Query().Get("url")
-	writeJSON(w, http.StatusOK, map[string]any{
-		"url": urlParam,
-	})
+	target, err := url.Parse(strings.TrimSpace(r.URL.Query().Get("url")))
+	if err != nil || target == nil || target.Hostname() == "" || target.User != nil || (target.Scheme != "http" && target.Scheme != "https") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Missing or invalid url"})
+		return
+	}
+	host := strings.ToLower(strings.TrimSuffix(target.Hostname(), "."))
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") || strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid url"})
+		return
+	}
+	if ip := net.ParseIP(host); ip != nil && (ip.IsPrivate() || ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid url"})
+		return
+	}
+	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, target.String(), nil)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid url"})
+		return
+	}
+	request.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+	response, err := (&http.Client{Timeout: 15 * time.Second}).Do(request)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Failed to fetch"})
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		writeJSON(w, response.StatusCode, map[string]string{"error": "Failed to fetch"})
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, 5<<20))
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Failed to fetch"})
+		return
+	}
+	iframeRE := regexp.MustCompile(`(?is)<iframe\b[^>]*\bsrc\s*=\s*["']([^"']+)["']`)
+	match := iframeRE.FindSubmatch(body)
+	if len(match) < 2 {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "Embed not found on page"})
+		return
+	}
+	embed, err := url.Parse(html.UnescapeString(strings.TrimSpace(string(match[1]))))
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "Embed not found on page"})
+		return
+	}
+	http.Redirect(w, r, target.ResolveReference(embed).String(), http.StatusFound)
+}
+
+func (h *ContentHandler) resolveWatchmodeFallback(r *http.Request, tmdbID int64, imdbID, mediaType string) (map[string]any, error) {
+	searchValues := []string{imdbID, strconv.FormatInt(tmdbID, 10)}
+	var titleID any
+	for _, searchValue := range searchValues {
+		if searchValue == "" {
+			continue
+		}
+		endpoint := "https://api.watchmode.com/v1/search/?" + watchmodeQuery(h.watchmodeAPIKey, searchValue, "")
+		payload, status, err := fetchWatchmodeJSON(r, endpoint)
+		if err != nil {
+			return nil, err
+		}
+		if status < 200 || status >= 300 {
+			continue
+		}
+		results, _ := payload["title_results"].([]any)
+		var firstTyped any
+		for _, raw := range results {
+			item, ok := raw.(map[string]any)
+			if !ok || !watchmodeTypeMatches(item, mediaType) || item["id"] == nil {
+				continue
+			}
+			if firstTyped == nil {
+				firstTyped = item["id"]
+			}
+			itemTMDB := fmt.Sprint(item["tmdb_id"])
+			if itemTMDB == "<nil>" {
+				itemTMDB = fmt.Sprint(item["tmdbid"])
+			}
+			itemIMDB := strings.TrimSpace(fmt.Sprint(item["imdb_id"]))
+			if (itemTMDB == strconv.FormatInt(tmdbID, 10)) || (imdbID != "" && itemIMDB == imdbID) {
+				titleID = item["id"]
+				break
+			}
+		}
+		if titleID == nil {
+			titleID = firstTyped
+		}
+		if titleID != nil {
+			break
+		}
+	}
+	if titleID == nil {
+		return nil, nil
+	}
+
+	for _, region := range []string{"IN", "US", "GB", "CA", ""} {
+		endpoint := "https://api.watchmode.com/v1/title/" + url.PathEscape(fmt.Sprint(titleID)) + "/sources/?" + watchmodeQuery(h.watchmodeAPIKey, "", region)
+		payload, status, err := fetchWatchmodeArray(r, endpoint)
+		if err != nil {
+			return nil, err
+		}
+		if status < 200 || status >= 300 {
+			continue
+		}
+		candidates := make([]map[string]any, 0)
+		for _, source := range payload {
+			candidate, ok := source.(map[string]any)
+			if !ok {
+				continue
+			}
+			candidateURL := firstNonEmptyString(candidate, "web_url", "url", "link", "deep_link", "ios_url", "android_url")
+			if candidateURL == "" {
+				continue
+			}
+			candidate["resolved_url"] = candidateURL
+			candidates = append(candidates, candidate)
+		}
+		sort.SliceStable(candidates, func(i, j int) bool {
+			return watchmodeSourceRank(candidates[i]["type"]) < watchmodeSourceRank(candidates[j]["type"])
+		})
+		if len(candidates) == 0 {
+			continue
+		}
+		best := candidates[0]
+		label := firstNonEmptyString(best, "name", "source_name")
+		if label == "" {
+			label = "Watchmode"
+		}
+		return map[string]any{
+			"url": best["resolved_url"], "label": label, "embeddable": false,
+			"message": "Watchmode fallback loaded.",
+		}, nil
+	}
+	return nil, nil
+}
+
+func watchmodeQuery(apiKey, searchValue, region string) string {
+	values := url.Values{"apiKey": []string{apiKey}}
+	if searchValue != "" {
+		values.Set("search_value", searchValue)
+		values.Set("search_type", "2")
+	}
+	if region != "" {
+		values.Set("regions", region)
+	}
+	return values.Encode()
+}
+
+func fetchWatchmodeJSON(r *http.Request, endpoint string) (map[string]any, int, error) {
+	body, status, err := fetchWatchmode(r, endpoint)
+	if err != nil || status < 200 || status >= 300 {
+		return nil, status, err
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, status, err
+	}
+	return payload, status, nil
+}
+
+func fetchWatchmodeArray(r *http.Request, endpoint string) ([]any, int, error) {
+	body, status, err := fetchWatchmode(r, endpoint)
+	if err != nil || status < 200 || status >= 300 {
+		return nil, status, err
+	}
+	var payload []any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, status, err
+	}
+	return payload, status, nil
+}
+
+func fetchWatchmode(r *http.Request, endpoint string) ([]byte, int, error) {
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, endpoint, nil)
+		if err != nil {
+			return nil, 0, err
+		}
+		request.Header.Set("Accept", "application/json")
+		response, err := (&http.Client{Timeout: 12 * time.Second}).Do(request)
+		if err == nil {
+			body, readErr := io.ReadAll(io.LimitReader(response.Body, 5<<20))
+			response.Body.Close()
+			if readErr != nil {
+				lastErr = readErr
+			} else {
+				return body, response.StatusCode, nil
+			}
+		} else {
+			lastErr = err
+		}
+		if attempt == 0 {
+			select {
+			case <-r.Context().Done():
+				return nil, 0, r.Context().Err()
+			case <-time.After(500 * time.Millisecond):
+			}
+		}
+	}
+	return nil, 0, lastErr
+}
+
+func watchmodeTypeMatches(item map[string]any, mediaType string) bool {
+	value := strings.ToLower(strings.TrimSpace(fmt.Sprint(item["type"])))
+	if value == "<nil>" || value == "" {
+		value = strings.ToLower(strings.TrimSpace(fmt.Sprint(item["media_type"])))
+	}
+	if mediaType == "movie" {
+		return value == "movie"
+	}
+	return value == "tv_series" || value == "series" || value == "tv"
+}
+
+func watchmodeSourceRank(raw any) int {
+	switch strings.ToLower(strings.TrimSpace(fmt.Sprint(raw))) {
+	case "sub":
+		return 0
+	case "free":
+		return 1
+	case "buy":
+		return 3
+	case "rent":
+		return 4
+	default:
+		return 2
+	}
+}
+
+func firstNonEmptyString(value map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if raw, ok := value[key].(string); ok && strings.TrimSpace(raw) != "" {
+			return strings.TrimSpace(raw)
+		}
+	}
+	return ""
 }
 
 func (h *ContentHandler) fetchProxy(w http.ResponseWriter, r *http.Request, endpoint string) {
