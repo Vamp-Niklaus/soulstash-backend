@@ -81,6 +81,24 @@ func (c *Client) InitIndexes(ctx context.Context) error {
 	if err != nil {
 		c.logger.Warn("Failed to create username unique index", slog.String("error", err.Error()))
 	}
+	// Enforce the same case-insensitive uniqueness used by signup checks.
+	caseInsensitive := &options.Collation{Locale: "en", Strength: 2}
+	_, err = usersCol.Indexes().CreateOne(initCtx, mongo.IndexModel{
+		Keys: bson.D{{Key: "username", Value: 1}},
+		Options: options.Index().SetUnique(true).SetName("username_case_insensitive_unique_index").SetCollation(caseInsensitive),
+	})
+	if err != nil {
+		c.logger.Warn("Failed to create case-insensitive username unique index", slog.String("error", err.Error()))
+	}
+	_, err = usersCol.Indexes().CreateOne(initCtx, mongo.IndexModel{
+		Keys: bson.D{{Key: "email", Value: 1}},
+		Options: options.Index().SetUnique(true).SetName("email_case_insensitive_unique_index").
+			SetCollation(caseInsensitive).
+			SetPartialFilterExpression(bson.M{"email": bson.M{"$type": "string", "$gt": ""}}),
+	})
+	if err != nil {
+		c.logger.Warn("Failed to create case-insensitive email unique index", slog.String("error", err.Error()))
+	}
 
 	// 2. Ratings: unique tmdbID + mediaType
 	ratingsCol := c.db.Collection(CollectionRatings)

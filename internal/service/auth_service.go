@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"regexp"
 	"strings"
@@ -23,6 +24,7 @@ var emailRegex = regexp.MustCompile(`^[^\s@]+@[^\s@]+\.[^\s@]+$`)
 // AuthService coordinates authentication and user lifecycle
 type AuthService interface {
 	CheckUsername(ctx context.Context, username string) (bool, string, error)
+	CheckEmail(ctx context.Context, email string) (bool, string, error)
 	Register(ctx context.Context, username, password, fullName string) (*AuthResult, error)
 	Login(ctx context.Context, identifier, password string) (*AuthResult, error)
 	VerifyToken(ctx context.Context, userID string) (*TokenVerifyResult, error)
@@ -92,8 +94,12 @@ func NewAuthService(userRepo repository.UserRepository, emailSender email.EmailS
 }
 
 func (s *authService) CheckUsername(ctx context.Context, username string) (bool, string, error) {
+	username = strings.TrimSpace(username)
 	if len(username) < 3 {
 		return false, "Username must be at least 3 characters", nil
+	}
+	if len(username) > 30 {
+		return false, "Username must be 30 characters or fewer", nil
 	}
 
 	user, err := s.userRepo.FindByUsername(ctx, username)
@@ -108,7 +114,24 @@ func (s *authService) CheckUsername(ctx context.Context, username string) (bool,
 	return true, "Username is available", nil
 }
 
+func (s *authService) CheckEmail(ctx context.Context, emailAddress string) (bool, string, error) {
+	emailAddress = strings.ToLower(strings.TrimSpace(emailAddress))
+	if !emailRegex.MatchString(emailAddress) {
+		return false, "Please enter a valid email address", nil
+	}
+	user, err := s.userRepo.FindByEmail(ctx, emailAddress)
+	if err != nil && err != domain.ErrNotFound {
+		return false, "Unable to check email availability", err
+	}
+	if user != nil {
+		return false, "Email is already registered", nil
+	}
+	return true, "Email is available", nil
+}
+
 func (s *authService) Register(ctx context.Context, username, password, fullName string) (*AuthResult, error) {
+	username = strings.TrimSpace(username)
+	fullName = strings.TrimSpace(fullName)
 	if username == "" || password == "" || fullName == "" {
 		return nil, domain.NewAppError(domain.ErrBadRequest, "Name, username and password are required", 400)
 	}
@@ -120,6 +143,13 @@ func (s *authService) Register(ctx context.Context, username, password, fullName
 	}
 	if len(password) < 6 {
 		return nil, domain.NewAppError(domain.ErrBadRequest, "Password must be at least 6 characters", 400)
+	}
+	available, message, err := s.CheckUsername(ctx, username)
+	if err != nil {
+		return nil, err
+	}
+	if !available {
+		return nil, domain.NewAppError(domain.ErrConflict, message, 409)
 	}
 
 	first, last := splitFullName(fullName)
@@ -170,6 +200,7 @@ func (s *authService) Register(ctx context.Context, username, password, fullName
 }
 
 func (s *authService) Login(ctx context.Context, identifier, password string) (*AuthResult, error) {
+	identifier = strings.TrimSpace(identifier)
 	if identifier == "" || password == "" {
 		return nil, domain.NewAppError(domain.ErrBadRequest, "Email/Username and password are required", 400)
 	}
@@ -295,6 +326,9 @@ func (s *authService) UpdateProfile(ctx context.Context, userID string, update P
 }
 
 func (s *authService) SendOTP(ctx context.Context, emailAddress, username, fullName string) (string, error) {
+	emailAddress = strings.ToLower(strings.TrimSpace(emailAddress))
+	username = strings.TrimSpace(username)
+	fullName = strings.TrimSpace(fullName)
 	if emailAddress == "" || username == "" || fullName == "" {
 		return "", domain.NewAppError(domain.ErrBadRequest, "Name, email and username are required", 400)
 	}
@@ -308,9 +342,19 @@ func (s *authService) SendOTP(ctx context.Context, emailAddress, username, fullN
 		return "", domain.NewAppError(domain.ErrBadRequest, "Please enter your full name", 400)
 	}
 
-	existing, _ := s.userRepo.FindByUsername(ctx, username)
-	if existing != nil {
-		return "", domain.NewAppError(domain.ErrConflict, "Username already exists", 409)
+	usernameAvailable, usernameMessage, err := s.CheckUsername(ctx, username)
+	if err != nil {
+		return "", err
+	}
+	if !usernameAvailable {
+		return "", domain.NewAppError(domain.ErrConflict, usernameMessage, 409)
+	}
+	emailAvailable, emailMessage, err := s.CheckEmail(ctx, emailAddress)
+	if err != nil {
+		return "", err
+	}
+	if !emailAvailable {
+		return "", domain.NewAppError(domain.ErrConflict, emailMessage, 409)
 	}
 
 	otp := generateRandomOTP()
@@ -332,10 +376,13 @@ func (s *authService) SendOTP(ctx context.Context, emailAddress, username, fullN
       </body></html>`, fullName, otp)
 
 	if s.emailSender == nil {
-		return "", domain.NewAppError(domain.ErrInternal, "Failed to send verification email", 502)
+		slog.Error("verification email delivery unavailable", slog.String("reason", "email sender is not configured"))
+		return "", domain.NewAppError(domain.ErrInternal, "Email verification is temporarily unavailable. Please try again later.", 502)
 	}
 	if err := s.emailSender.SendEmail(ctx, emailAddress, fullName, "Verify Your Email - Soulstash", html); err != nil {
-		return "", domain.NewAppError(domain.ErrInternal, "Failed to send verification email", 502)
+		// Log provider status/reason without logging the recipient address or OTP.
+		slog.Error("verification email delivery failed", slog.String("error", err.Error()))
+		return "", domain.NewAppError(domain.ErrInternal, "Failed to send verification email. Please try again later.", 502)
 	}
 
 	s.otpStore.Store(emailAddress, entry)
@@ -344,11 +391,12 @@ func (s *authService) SendOTP(ctx context.Context, emailAddress, username, fullN
 }
 
 func (s *authService) ForgotPassword(ctx context.Context, emailAddress string) error {
+	emailAddress = strings.ToLower(strings.TrimSpace(emailAddress))
 	if emailAddress == "" {
 		return domain.NewAppError(domain.ErrBadRequest, "Email is required", 400)
 	}
 
-	user, err := s.userRepo.FindByEmailOrUsername(ctx, emailAddress)
+	user, err := s.userRepo.FindByEmail(ctx, emailAddress)
 	if err != nil || user == nil {
 		return domain.NewAppError(domain.ErrNotFound, "Email not found in our records", 404)
 	}
@@ -385,6 +433,7 @@ func (s *authService) ForgotPassword(ctx context.Context, emailAddress string) e
 }
 
 func (s *authService) ResetPassword(ctx context.Context, emailAddress, otp, newPassword string) error {
+	emailAddress = strings.ToLower(strings.TrimSpace(emailAddress))
 	if emailAddress == "" || otp == "" || newPassword == "" {
 		return domain.NewAppError(domain.ErrBadRequest, "Email, OTP, and new password are required", 400)
 	}
@@ -397,7 +446,7 @@ func (s *authService) ResetPassword(ctx context.Context, emailAddress, otp, newP
 		return domain.NewAppError(domain.ErrBadRequest, "Invalid or expired OTP", 400)
 	}
 
-	user, err := s.userRepo.FindByEmailOrUsername(ctx, emailAddress)
+	user, err := s.userRepo.FindByEmail(ctx, emailAddress)
 	if err != nil {
 		return domain.NewAppError(domain.ErrBadRequest, "User not found", 400)
 	}
@@ -416,8 +465,17 @@ func (s *authService) ResetPassword(ctx context.Context, emailAddress, otp, newP
 }
 
 func (s *authService) VerifyOTPAndRegister(ctx context.Context, emailAddress, username, password, otp, fullName string) (*AuthResult, error) {
+	emailAddress = strings.ToLower(strings.TrimSpace(emailAddress))
+	username = strings.TrimSpace(username)
+	fullName = strings.TrimSpace(fullName)
 	if emailAddress == "" || username == "" || password == "" || otp == "" || fullName == "" {
 		return nil, domain.NewAppError(domain.ErrBadRequest, "All fields are required", 400)
+	}
+	if !emailRegex.MatchString(emailAddress) {
+		return nil, domain.NewAppError(domain.ErrBadRequest, "Please enter a valid email address", 400)
+	}
+	if len(username) < 3 || len(username) > 30 {
+		return nil, domain.NewAppError(domain.ErrBadRequest, "Username must be between 3 and 30 characters", 400)
 	}
 	if len(password) < 6 {
 		return nil, domain.NewAppError(domain.ErrBadRequest, "Password must be at least 6 characters", 400)
@@ -425,7 +483,6 @@ func (s *authService) VerifyOTPAndRegister(ctx context.Context, emailAddress, us
 	if len(strings.TrimSpace(fullName)) < 2 {
 		return nil, domain.NewAppError(domain.ErrBadRequest, "Please enter your full name", 400)
 	}
-
 	val, ok := s.otpStore.Load(emailAddress)
 	if !ok {
 		return nil, domain.NewAppError(domain.ErrBadRequest, "OTP not found or expired", 400)
@@ -443,10 +500,21 @@ func (s *authService) VerifyOTPAndRegister(ctx context.Context, emailAddress, us
 		return nil, domain.NewAppError(domain.ErrBadRequest, "Invalid request data", 400)
 	}
 
-	existing, _ := s.userRepo.FindByUsername(ctx, username)
-	if existing != nil {
+	usernameAvailable, usernameMessage, err := s.CheckUsername(ctx, username)
+	if err != nil {
+		return nil, err
+	}
+	if !usernameAvailable {
 		s.otpStore.Delete(emailAddress)
-		return nil, domain.NewAppError(domain.ErrConflict, "Username already exists", 409)
+		return nil, domain.NewAppError(domain.ErrConflict, usernameMessage, 409)
+	}
+	emailAvailable, emailMessage, err := s.CheckEmail(ctx, emailAddress)
+	if err != nil {
+		return nil, err
+	}
+	if !emailAvailable {
+		s.otpStore.Delete(emailAddress)
+		return nil, domain.NewAppError(domain.ErrConflict, emailMessage, 409)
 	}
 
 	first, last := splitFullName(fullName)
@@ -471,7 +539,10 @@ func (s *authService) VerifyOTPAndRegister(ctx context.Context, emailAddress, us
 	if err := s.userRepo.Create(ctx, user); err != nil {
 		if err == domain.ErrConflict {
 			s.otpStore.Delete(emailAddress)
-			return nil, domain.NewAppError(domain.ErrConflict, "Username already exists", 409)
+			if existingEmail, lookupErr := s.userRepo.FindByEmail(ctx, emailAddress); lookupErr == nil && existingEmail != nil {
+				return nil, domain.NewAppError(domain.ErrConflict, "Email is already registered", 409)
+			}
+			return nil, domain.NewAppError(domain.ErrConflict, "Username is already taken", 409)
 		}
 		return nil, err
 	}

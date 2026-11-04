@@ -41,6 +41,9 @@ func main() {
 	if err := cfg.Validate(); err != nil {
 		logger.Warn("Configuration validation warning (running in partial mode if db missing)", slog.String("error", err.Error()))
 	}
+	if cfg.BrevoAPIKey == "" {
+		logger.Warn("BREVO_API_KEY is not configured; verification and password reset emails will fail")
+	}
 
 	var mongoClient *mongodb.Client
 	var trafficBuf *traffic.Buffer

@@ -32,6 +32,7 @@ func NewAuthHandler(authService service.AuthService, jwtSecret string) *AuthHand
 // RegisterRoutes mounts all auth endpoints onto the given router
 func (h *AuthHandler) RegisterRoutes(r chi.Router) {
 	r.Get("/check-username", h.CheckUsername)
+	r.Get("/check-email", h.CheckEmail)
 	r.Post("/register", h.Register)
 	r.Post("/login", h.Login)
 	r.Post("/logout", h.Logout)
@@ -48,6 +49,16 @@ func (h *AuthHandler) RegisterRoutes(r chi.Router) {
 		protected.Get("/profile", h.GetProfile)
 		protected.Post("/update-profile", h.UpdateProfile)
 	})
+}
+
+func (h *AuthHandler) CheckEmail(w http.ResponseWriter, r *http.Request) {
+	emailAddress := r.URL.Query().Get("email")
+	available, message, err := h.authService.CheckEmail(r.Context(), emailAddress)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"available": false, "message": "Unable to check email availability"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"available": available, "message": message})
 }
 
 func (h *AuthHandler) CheckUsername(w http.ResponseWriter, r *http.Request) {

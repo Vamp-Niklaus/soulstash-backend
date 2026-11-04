@@ -2,6 +2,7 @@ package service_test
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,8 +37,19 @@ func (m *mockUserRepo) FindByUsername(ctx context.Context, username string) (*do
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, u := range m.users {
-		if u.Username == username {
+		if strings.EqualFold(u.Username, strings.TrimSpace(username)) {
 			return u, nil
+		}
+	}
+	return nil, domain.ErrNotFound
+}
+
+func (m *mockUserRepo) FindByEmail(ctx context.Context, email string) (*domain.User, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, user := range m.users {
+		if strings.EqualFold(user.Email, email) {
+			return user, nil
 		}
 	}
 	return nil, domain.ErrNotFound
@@ -47,7 +59,7 @@ func (m *mockUserRepo) FindByEmailOrUsername(ctx context.Context, identifier str
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, u := range m.users {
-		if u.Username == identifier || u.Email == identifier {
+		if strings.EqualFold(u.Username, strings.TrimSpace(identifier)) || strings.EqualFold(u.Email, strings.TrimSpace(identifier)) {
 			return u, nil
 		}
 	}
@@ -58,7 +70,7 @@ func (m *mockUserRepo) Create(ctx context.Context, user *domain.User) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, u := range m.users {
-		if u.Username == user.Username {
+		if strings.EqualFold(u.Username, user.Username) || (user.Email != "" && strings.EqualFold(u.Email, user.Email)) {
 			return domain.ErrConflict
 		}
 	}

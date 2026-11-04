@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 type UserRepository interface {
 	FindByID(ctx context.Context, id string) (*domain.User, error)
 	FindByUsername(ctx context.Context, username string) (*domain.User, error)
+	FindByEmail(ctx context.Context, email string) (*domain.User, error)
 	FindByEmailOrUsername(ctx context.Context, identifier string) (*domain.User, error)
 	Create(ctx context.Context, user *domain.User) error
 	Update(ctx context.Context, id string, update bson.M) error
@@ -72,7 +74,7 @@ func (r *mongoUserRepo) FindByUsername(ctx context.Context, username string) (*d
 	coll := r.db.Collection(mongodb.CollectionUsers)
 	filter := bson.M{
 		"username": bson.M{
-			"$regex":   fmt.Sprintf("^%s$", username),
+			"$regex":   fmt.Sprintf("^%s$", regexp.QuoteMeta(strings.TrimSpace(username))),
 			"$options": "i",
 		},
 	}
@@ -88,6 +90,22 @@ func (r *mongoUserRepo) FindByUsername(ctx context.Context, username string) (*d
 	return &user, nil
 }
 
+func (r *mongoUserRepo) FindByEmail(ctx context.Context, email string) (*domain.User, error) {
+	var user domain.User
+	err := r.db.Collection(mongodb.CollectionUsers).FindOne(
+		ctx,
+		bson.M{"email": strings.TrimSpace(email)},
+		options.FindOne().SetCollation(&options.Collation{Locale: "en", Strength: 2}),
+	).Decode(&user)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, domain.ErrNotFound
+		}
+		return nil, fmt.Errorf("user find by email error: %w", err)
+	}
+	return &user, nil
+}
+
 func (r *mongoUserRepo) FindByEmailOrUsername(ctx context.Context, identifier string) (*domain.User, error) {
 	coll := r.db.Collection(mongodb.CollectionUsers)
 	filter := bson.M{
@@ -98,7 +116,7 @@ func (r *mongoUserRepo) FindByEmailOrUsername(ctx context.Context, identifier st
 	}
 
 	var user domain.User
-	err := coll.FindOne(ctx, filter).Decode(&user)
+	err := coll.FindOne(ctx, filter, options.FindOne().SetCollation(&options.Collation{Locale: "en", Strength: 2})).Decode(&user)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, domain.ErrNotFound

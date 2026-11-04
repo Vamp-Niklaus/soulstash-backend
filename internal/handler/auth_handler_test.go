@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,8 +47,17 @@ func (m *mockUserRepo) FindByID(ctx context.Context, id string) (*domain.User, e
 
 func (m *mockUserRepo) FindByUsername(ctx context.Context, username string) (*domain.User, error) {
 	for _, u := range m.users {
-		if u.Username == username {
+		if strings.EqualFold(u.Username, strings.TrimSpace(username)) {
 			return u, nil
+		}
+	}
+	return nil, domain.ErrNotFound
+}
+
+func (m *mockUserRepo) FindByEmail(ctx context.Context, email string) (*domain.User, error) {
+	for _, user := range m.users {
+		if strings.EqualFold(user.Email, email) {
+			return user, nil
 		}
 	}
 	return nil, domain.ErrNotFound
@@ -55,7 +65,7 @@ func (m *mockUserRepo) FindByUsername(ctx context.Context, username string) (*do
 
 func (m *mockUserRepo) FindByEmailOrUsername(ctx context.Context, identifier string) (*domain.User, error) {
 	for _, u := range m.users {
-		if u.Username == identifier || u.Email == identifier {
+		if strings.EqualFold(u.Username, strings.TrimSpace(identifier)) || strings.EqualFold(u.Email, strings.TrimSpace(identifier)) {
 			return u, nil
 		}
 	}
@@ -64,7 +74,7 @@ func (m *mockUserRepo) FindByEmailOrUsername(ctx context.Context, identifier str
 
 func (m *mockUserRepo) Create(ctx context.Context, user *domain.User) error {
 	for _, u := range m.users {
-		if u.Username == user.Username {
+		if strings.EqualFold(u.Username, user.Username) || (user.Email != "" && strings.EqualFold(u.Email, user.Email)) {
 			return domain.ErrConflict
 		}
 	}

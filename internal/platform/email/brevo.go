@@ -24,7 +24,7 @@ func NewBrevoClient(apiKey string) EmailSender {
 	return &brevoClient{
 		apiKey: apiKey,
 		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout: 30 * time.Second,
 		},
 	}
 }
