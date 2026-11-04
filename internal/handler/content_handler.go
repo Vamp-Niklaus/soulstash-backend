@@ -52,6 +52,7 @@ func (h *ContentHandler) RegisterRoutes(r chi.Router) {
 		// TMDB collections & person images
 		cr.Get("/tmdb-collection/{id}", h.GetTMDBCollection)
 		cr.Get("/person/{id}/images", h.GetPersonImages)
+		cr.Get("/people/{id}/images", h.GetPersonImages)
 		cr.Get("/imdb/person/{personId}/filmography", h.GetPersonFilmography)
 
 		// Discovery & Details
