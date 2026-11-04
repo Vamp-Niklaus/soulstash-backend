@@ -527,8 +527,11 @@ func (s *collectionService) GetPublicCollection(ctx context.Context, username, c
 	}
 
 	for _, c := range user.Collections {
-		if (strings.EqualFold(c.Name, collectionName) || fmt.Sprintf("%v", c.ID) == collectionName) && c.IsPublic {
-			return &c, nil
+		if c.Name == collectionName {
+			if c.IsPublic || c.Visibility == "public" || c.IsPublished {
+				return &c, nil
+			}
+			return nil, domain.NewAppError(domain.ErrForbidden, "Collection is private", 403)
 		}
 	}
 	return nil, domain.NewAppError(domain.ErrNotFound, "Collection not found", 404)

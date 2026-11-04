@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -19,6 +20,8 @@ const InvalidImdbSentinel = 10.0
 
 type RatingsService interface {
 	ResolveRating(ctx context.Context, tmdbID int, mediaType string, seedImdbID string, seedVoteAvg *float64) (*domain.RatingRecord, error)
+	GetStoredRating(ctx context.Context, tmdbID int, mediaType string) (*domain.RatingRecord, error)
+	ListRatings(ctx context.Context, mediaType string, limit int) ([]domain.RatingRecord, error)
 	BatchEnrich(ctx context.Context, items []map[string]any) []map[string]any
 	GetCounters(ctx context.Context) (*domain.AppMetrics, error)
 }
@@ -177,6 +180,31 @@ func (s *ratingsService) BatchEnrich(ctx context.Context, items []map[string]any
 
 func (s *ratingsService) GetCounters(ctx context.Context) (*domain.AppMetrics, error) {
 	return s.repo.GetMetrics(ctx)
+}
+
+func (s *ratingsService) ListRatings(ctx context.Context, mediaType string, limit int) ([]domain.RatingRecord, error) {
+	normType := ""
+	if strings.TrimSpace(mediaType) != "" {
+		normType = normalizeMediaType(mediaType)
+	}
+	return s.repo.FindRatings(ctx, normType, limit)
+}
+
+func (s *ratingsService) GetStoredRating(ctx context.Context, tmdbID int, mediaType string) (*domain.RatingRecord, error) {
+	if tmdbID <= 0 {
+		return nil, domain.NewAppError(domain.ErrBadRequest, "Valid tmdbID is required", 400)
+	}
+	record, err := s.repo.FindRating(ctx, tmdbID, normalizeMediaType(mediaType))
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) || record == nil {
+			return nil, domain.NewAppError(domain.ErrNotFound, "Rating row not found", 404)
+		}
+		return nil, err
+	}
+	if record == nil {
+		return nil, domain.NewAppError(domain.ErrNotFound, "Rating row not found", 404)
+	}
+	return record, nil
 }
 
 func (s *ratingsService) fetchOmdbRating(ctx context.Context, imdbID string) (*float64, error) {

@@ -250,19 +250,13 @@ func (h *AuthHandler) SendOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	otp, err := h.authService.SendOTP(r.Context(), body.Email, body.Username, body.FullName)
+	_, err := h.authService.SendOTP(r.Context(), body.Email, body.Username, body.FullName)
 	if err != nil {
 		handleServiceError(w, err)
 		return
 	}
 
-	resp := map[string]any{"message": "OTP sent successfully"}
-	// In dev mode, return OTP for easy testing
-	if strings.EqualFold(r.Header.Get("X-Environment"), "development") || otp != "" {
-		resp["otp"] = otp
-	}
-
-	writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, http.StatusOK, map[string]string{"message": "OTP sent successfully"})
 }
 
 func (h *AuthHandler) ForgotPassword(w http.ResponseWriter, r *http.Request) {

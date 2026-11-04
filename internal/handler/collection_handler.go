@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"soulstash/internal/domain"
 	"soulstash/internal/middleware"
 	"soulstash/internal/service"
 
@@ -588,7 +589,40 @@ func (h *CollectionHandler) GetPublicCollection(w http.ResponseWriter, r *http.R
 		handleServiceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, col)
+	writeJSON(w, http.StatusOK, []map[string]any{{
+		"_id":         collectionResponseID(col),
+		"name":        col.Name,
+		"isDeletable": col.IsDeletable,
+		"isPublic":    col.IsPublic,
+		"isPublished": col.IsPublished,
+		"description": col.Description,
+		"banner":      collectionResponseBanner(col.Banner),
+		"movieCount":  len(col.Movies),
+		"movies":      collectionResponseMovies(col.Movies),
+		"createdAt":   col.CreatedAt,
+		"updatedAt":   col.UpdatedAt,
+	}})
+}
+
+func collectionResponseID(col *domain.UserCollection) any {
+	if col.ID == nil || col.ID == "" {
+		return col.Name
+	}
+	return col.ID
+}
+
+func collectionResponseBanner(banner string) string {
+	if banner == "" {
+		return "https://cdn.imgchest.com/files/b23d0bfcaa8b.jpg"
+	}
+	return banner
+}
+
+func collectionResponseMovies(movies []any) []any {
+	if movies == nil {
+		return []any{}
+	}
+	return movies
 }
 
 func (h *CollectionHandler) GetPublishedCollections(w http.ResponseWriter, r *http.Request) {

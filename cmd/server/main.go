@@ -17,6 +17,9 @@ import (
 	"soulstash/internal/repository"
 	"soulstash/internal/server"
 	"soulstash/internal/service"
+
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 )
 
 func main() {
@@ -79,6 +82,9 @@ func main() {
 
 	// Engines & Services
 	adultEngine := service.NewAdultDecisionEngine()
+	if mongoClient != nil {
+		loadPersistedAdultSettings(context.Background(), mongoClient.Database(), adultEngine, logger)
+	}
 	authSvc := service.NewAuthService(userRepo, brevoClient, cfg.JWTSecret)
 	collectionSvc := service.NewCollectionService(collectionRepo)
 	ratingsSvc := service.NewRatingsService(ratingsRepo, tmdbClient, cfg.OMDBAPIKey)
@@ -131,4 +137,30 @@ func main() {
 	}
 
 	logger.Info("Server stopped cleanly")
+}
+
+func loadPersistedAdultSettings(ctx context.Context, db *mongo.Database, engine *service.AdultDecisionEngine, logger *slog.Logger) {
+	if db == nil || engine == nil {
+		return
+	}
+	var treeDoc struct {
+		Tree *service.TreeNode `bson:"tree"`
+	}
+	if err := db.Collection(mongodb.CollectionAdminSettings).FindOne(ctx, bson.M{"_id": "adult_criteria"}).Decode(&treeDoc); err == nil {
+		if treeDoc.Tree != nil {
+			engine.SetTree(treeDoc.Tree)
+		}
+	} else if err != mongo.ErrNoDocuments {
+		logger.Warn("Could not load saved adult criteria", slog.String("error", err.Error()))
+	}
+	var keywordDoc struct {
+		Keywords []service.KeywordItem `bson:"keywords"`
+	}
+	if err := db.Collection(mongodb.CollectionAdminSettings).FindOne(ctx, bson.M{"_id": "adult_keywords_config"}).Decode(&keywordDoc); err == nil {
+		if len(keywordDoc.Keywords) > 0 {
+			engine.SetKeywords(keywordDoc.Keywords)
+		}
+	} else if err != mongo.ErrNoDocuments {
+		logger.Warn("Could not load saved adult keywords", slog.String("error", err.Error()))
+	}
 }

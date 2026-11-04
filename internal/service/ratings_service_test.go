@@ -36,6 +36,19 @@ func (m *mockRatingsRepo) FindRating(ctx context.Context, tmdbID int, mediaType 
 	return nil, nil
 }
 
+func (m *mockRatingsRepo) FindRatings(ctx context.Context, mediaType string, limit int) ([]domain.RatingRecord, error) {
+	items := make([]domain.RatingRecord, 0, len(m.ratings))
+	for _, item := range m.ratings {
+		if mediaType == "" || item.MediaType == mediaType {
+			items = append(items, *item)
+		}
+	}
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	return items, nil
+}
+
 func (m *mockRatingsRepo) UpsertRating(ctx context.Context, rating *domain.RatingRecord) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -95,6 +108,21 @@ func TestRatingsService_ImdbSentinelFiltering(t *testing.T) {
 	}
 	if res2.ImdbRating == nil || *res2.ImdbRating != 8.5 {
 		t.Errorf("expected ImdbRating 8.5, got %v", res2.ImdbRating)
+	}
+}
+
+func TestRatingsService_GetStoredRatingUsesLocalRowAnd404ForMissing(t *testing.T) {
+	repo := newMockRatingsRepo()
+	repo.ratings["99_Series"] = &domain.RatingRecord{TmdbID: 99, MediaType: "Series", Type: "Series"}
+	svc := NewRatingsService(repo, nil, "")
+	row, err := svc.GetStoredRating(context.Background(), 99, "tv")
+	if err != nil || row == nil || row.MediaType != "Series" {
+		t.Fatalf("expected local Series rating row, got %#v, %v", row, err)
+	}
+	if _, err := svc.GetStoredRating(context.Background(), 100, "movie"); err == nil {
+		t.Fatal("expected a missing rating row to return 404")
+	} else if appErr, ok := err.(*domain.AppError); !ok || appErr.Code != 404 {
+		t.Fatalf("expected 404 app error for missing row, got %v", err)
 	}
 }
 

@@ -9,19 +9,19 @@ import (
 )
 
 type TreeNode struct {
-	ID       string    `json:"id"`
-	Type     string    `json:"type"` // "decision" or "result"
-	Field    string    `json:"field,omitempty"`
-	Operator string    `json:"operator,omitempty"`
-	Value    any       `json:"value,omitempty"`
-	IsAdult  bool      `json:"isAdult,omitempty"`
-	YesNode  *TreeNode `json:"yesNode,omitempty"`
-	NoNode   *TreeNode `json:"noNode,omitempty"`
+	ID       string    `json:"id" bson:"id"`
+	Type     string    `json:"type" bson:"type"` // "decision" or "result"
+	Field    string    `json:"field,omitempty" bson:"field,omitempty"`
+	Operator string    `json:"operator,omitempty" bson:"operator,omitempty"`
+	Value    any       `json:"value,omitempty" bson:"value,omitempty"`
+	IsAdult  bool      `json:"isAdult,omitempty" bson:"isAdult,omitempty"`
+	YesNode  *TreeNode `json:"yesNode,omitempty" bson:"yesNode,omitempty"`
+	NoNode   *TreeNode `json:"noNode,omitempty" bson:"noNode,omitempty"`
 }
 
 type KeywordItem struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID   string `json:"id" bson:"id"`
+	Name string `json:"name" bson:"name"`
 }
 
 type TraceStep struct {
@@ -49,6 +49,12 @@ var defaultKeywords = []KeywordItem{
 	{ID: "286925", Name: "taboo"},
 	{ID: "11034", Name: "fetish"},
 	{ID: "2804", Name: "passion"},
+}
+
+func GetDefaultKeywords() []KeywordItem {
+	keywords := make([]KeywordItem, len(defaultKeywords))
+	copy(keywords, defaultKeywords)
+	return keywords
 }
 
 func GetDefaultTree() *TreeNode {

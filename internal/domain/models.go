@@ -42,6 +42,7 @@ type UserCollection struct {
 	IsDeletable bool      `bson:"isDeletable" json:"isDeletable"`
 	IsPublic    bool      `bson:"isPublic" json:"isPublic"`
 	IsPublished bool      `bson:"isPublished" json:"isPublished"`
+	Visibility  string    `bson:"visibility,omitempty" json:"visibility,omitempty"`
 	Banner      string    `bson:"banner" json:"banner"`
 	MovieCount  int       `bson:"movieCount" json:"movieCount"`
 	Movies      []any     `bson:"movies" json:"movies"`

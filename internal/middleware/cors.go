@@ -16,6 +16,7 @@ var (
 		"http://localhost":                   true,
 		"https://localhost":                  true,
 		"capacitor://localhost":              true,
+		"http://tauri.localhost":             true,
 	}
 )
 
@@ -29,6 +30,7 @@ func CORS(isProduction bool) func(http.Handler) http.Handler {
 				"http://localhost",
 				"https://localhost",
 				"capacitor://localhost",
+				"http://tauri.localhost",
 			},
 			AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 			AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-User-Name", "X-Collection-Version"},

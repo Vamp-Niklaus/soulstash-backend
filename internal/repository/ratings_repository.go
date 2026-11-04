@@ -15,6 +15,7 @@ import (
 
 type RatingsRepository interface {
 	FindRating(ctx context.Context, tmdbID int, mediaType string) (*domain.RatingRecord, error)
+	FindRatings(ctx context.Context, mediaType string, limit int) ([]domain.RatingRecord, error)
 	UpsertRating(ctx context.Context, record *domain.RatingRecord) error
 	IncrementMetric(ctx context.Context, metricField string) error
 	GetMetrics(ctx context.Context) (*domain.AppMetrics, error)
@@ -44,6 +45,30 @@ func (r *mongoRatingsRepo) FindRating(ctx context.Context, tmdbID int, mediaType
 		return nil, err
 	}
 	return &record, nil
+}
+
+func (r *mongoRatingsRepo) FindRatings(ctx context.Context, mediaType string, limit int) ([]domain.RatingRecord, error) {
+	filter := bson.M{}
+	if mediaType != "" {
+		filter["mediaType"] = mediaType
+	}
+	if limit < 1 {
+		limit = 5000
+	}
+
+	cursor, err := r.db.Collection(mongodb.CollectionRatings).Find(ctx, filter, options.Find().
+		SetSort(bson.D{{Key: "updatedAt", Value: -1}, {Key: "tmdbID", Value: 1}}).
+		SetLimit(int64(limit)))
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	items := make([]domain.RatingRecord, 0)
+	if err := cursor.All(ctx, &items); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 func (r *mongoRatingsRepo) UpsertRating(ctx context.Context, record *domain.RatingRecord) error {

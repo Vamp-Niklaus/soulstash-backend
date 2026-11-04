@@ -2,6 +2,7 @@ package service_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -85,5 +86,28 @@ func TestCollectionService_CRUD(t *testing.T) {
 	}
 	if delResult.Message == "" {
 		t.Errorf("expected non-empty delete message")
+	}
+}
+
+func TestCollectionService_PublicCollectionVisibilityParity(t *testing.T) {
+	publicUser := &domain.User{
+		Username: "creator",
+		Collections: []domain.UserCollection{
+			{Name: "Published", IsPublished: true},
+			{Name: "Legacy Public", Visibility: "public"},
+			{Name: "Watched", IsPublic: false},
+		},
+	}
+	svc := service.NewCollectionService(newMockCollectionRepo(publicUser))
+	if _, err := svc.GetPublicCollection(context.Background(), "creator", "Published"); err != nil {
+		t.Fatalf("expected published collection to be readable: %v", err)
+	}
+	if _, err := svc.GetPublicCollection(context.Background(), "creator", "Legacy Public"); err != nil {
+		t.Fatalf("expected legacy public collection to be readable: %v", err)
+	}
+	_, err := svc.GetPublicCollection(context.Background(), "creator", "Watched")
+	var appErr *domain.AppError
+	if !errors.As(err, &appErr) || appErr.Code != 403 {
+		t.Fatalf("expected a private collection to return 403, got %v", err)
 	}
 }

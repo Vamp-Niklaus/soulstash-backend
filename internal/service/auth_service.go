@@ -322,8 +322,6 @@ func (s *authService) SendOTP(ctx context.Context, emailAddress, username, fullN
 		CreatedAt: time.Now(),
 		ExpiresAt: time.Now().Add(10 * time.Minute),
 	}
-	s.otpStore.Store(emailAddress, entry)
-
 	html := fmt.Sprintf(`<html><body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px">
         <h2>Welcome to Soulstash, %s!</h2>
         <p>Your registration OTP:</p>
@@ -333,9 +331,14 @@ func (s *authService) SendOTP(ctx context.Context, emailAddress, username, fullN
         <p>Expires in 10 minutes. Do not share.</p>
       </body></html>`, fullName, otp)
 
-	if s.emailSender != nil {
-		_ = s.emailSender.SendEmail(ctx, emailAddress, fullName, "Verify Your Email - Soulstash", html)
+	if s.emailSender == nil {
+		return "", domain.NewAppError(domain.ErrInternal, "Failed to send verification email", 502)
 	}
+	if err := s.emailSender.SendEmail(ctx, emailAddress, fullName, "Verify Your Email - Soulstash", html); err != nil {
+		return "", domain.NewAppError(domain.ErrInternal, "Failed to send verification email", 502)
+	}
+
+	s.otpStore.Store(emailAddress, entry)
 
 	return otp, nil
 }
@@ -365,8 +368,17 @@ func (s *authService) ForgotPassword(ctx context.Context, emailAddress string) e
         <p>Expires in 15 minutes. Do not share.</p>
       </body></html>`, user.Username, otp)
 
-	if s.emailSender != nil {
-		_ = s.emailSender.SendEmail(ctx, emailAddress, user.Username, "Reset Your Password - Soulstash", html)
+	if s.emailSender == nil {
+		if resetID, err := s.userRepo.FindValidPasswordReset(ctx, emailAddress, otp); err == nil {
+			_ = s.userRepo.DeletePasswordReset(ctx, resetID)
+		}
+		return domain.NewAppError(domain.ErrInternal, "Failed to send password reset email", 502)
+	}
+	if err := s.emailSender.SendEmail(ctx, emailAddress, user.Username, "Reset Your Password - Soulstash", html); err != nil {
+		if resetID, findErr := s.userRepo.FindValidPasswordReset(ctx, emailAddress, otp); findErr == nil {
+			_ = s.userRepo.DeletePasswordReset(ctx, resetID)
+		}
+		return domain.NewAppError(domain.ErrInternal, "Failed to send password reset email", 502)
 	}
 
 	return nil

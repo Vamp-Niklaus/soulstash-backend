@@ -49,6 +49,21 @@ func TestRecovererMiddleware(t *testing.T) {
 	assert.Equal(t, "Something went wrong!", body["error"])
 }
 
+func TestProductionCORSAllowsTauriDesktopOrigin(t *testing.T) {
+	handler := middleware.CORS(true)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodOptions, "/api/health", nil)
+	req.Header.Set("Origin", "http://tauri.localhost")
+	req.Header.Set("Access-Control-Request-Method", http.MethodGet)
+	req.Header.Set("Access-Control-Request-Headers", "authorization,content-type")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, "http://tauri.localhost", rec.Header().Get("Access-Control-Allow-Origin"))
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
 func TestAuthMiddlewareMissingToken(t *testing.T) {
 	secret := "test-secret"
 	handler := middleware.AuthenticateToken(secret)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

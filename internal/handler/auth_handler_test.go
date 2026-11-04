@@ -25,6 +25,12 @@ type mockUserRepo struct {
 	users map[string]*domain.User
 }
 
+type successfulEmailSender struct{}
+
+func (successfulEmailSender) SendEmail(context.Context, string, string, string, string) error {
+	return nil
+}
+
 func newMockUserRepo() *mockUserRepo {
 	return &mockUserRepo{users: make(map[string]*domain.User)}
 }
@@ -233,4 +239,23 @@ func TestRegisterAndLoginFlow(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	_ = secret
+}
+
+func TestSendOTPDoesNotExposeDevelopmentCode(t *testing.T) {
+	secret := "test-jwt-secret-key-at-least-32-chars-long"
+	service := service.NewAuthService(newMockUserRepo(), successfulEmailSender{}, secret)
+	h := handler.NewAuthHandler(service, secret)
+	r := chi.NewRouter()
+	r.Post("/api/auth/send-otp", h.SendOTP)
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/send-otp", bytes.NewBufferString(`{"email":"user@example.com","username":"newuser","fullName":"New User"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Environment", "development")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var payload map[string]any
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&payload))
+	assert.Equal(t, "OTP sent successfully", payload["message"])
+	assert.NotContains(t, payload, "otp")
 }

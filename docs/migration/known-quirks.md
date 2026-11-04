@@ -54,13 +54,13 @@ This document records idiosyncrasies, legacy schema fixes, edge-case sentinels, 
 
 ---
 
-## 5. Dual OTP Storage Mechanism
+## 5. Dual OTP Storage Mechanism and OTP Privacy
 - **Location**: `routes/auth.js` lines 9, 300
 - **Behavior**:
   - Registration OTPs (`send-otp` -> `verify-otp-and-register`) are stored in an in-memory `Map` (`otpStore`) with a 10-minute expiration.
   - Password reset OTPs (`forgot-password` -> `reset-password`) are stored in MongoDB's `password_resets` collection with a 15-minute expiration.
 - **Go Migration Rule**:
-  Maintain in-memory thread-safe store for registration OTPs and MongoDB collection for password resets, maintaining identical validation, timeout, and response payloads.
+  Maintain an in-memory thread-safe store for registration OTPs and MongoDB collection for password resets, with the same validation and timeouts. Never include OTP values in API responses or logs in any environment. Store a registration OTP only after its email sends successfully; if delivery fails, discard it and return an error. If reset email delivery fails, remove the pending reset record and return an error. The API/UI must show only a generic delivery message.
 
 ---
 
