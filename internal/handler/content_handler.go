@@ -1540,7 +1540,7 @@ func (h *ContentHandler) GetPlayerSources(w http.ResponseWriter, r *http.Request
 	}
 
 	var youtubeURL string
-	if urls := sanitizePlayerProviderURLs(providerMap["youtube"]); len(urls) > 0 && isYouTubeFullSource(sourceRecord, 0) {
+	if urls := sanitizePlayerProviderURLs(providerMap["youtube"]); len(urls) > 0 && isYouTubeFullSource(sourceRecord, 0, mediaType) {
 		youtubeURL = urls[0]
 	}
 	knownProviders["youtube"] = struct{}{}
@@ -1552,6 +1552,7 @@ func (h *ContentHandler) GetPlayerSources(w http.ResponseWriter, r *http.Request
 			}
 			sourceRecord["youtubeDurationSeconds"] = video.Seconds
 			sourceRecord["youtubeTargetRuntimeMinutes"] = identity.runtimeMinutes
+			sourceRecord["youtubeTargetYear"] = identity.year
 			sourceRecord["youtubeTitle"] = video.Title
 			sourceRecord["updatedAt"] = time.Now()
 			h.persistYouTubeSource(r.Context(), parsedID, identity, *video)

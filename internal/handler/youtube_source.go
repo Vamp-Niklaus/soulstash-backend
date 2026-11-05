@@ -123,7 +123,7 @@ func buildYouTubeQueries(identity youtubeIdentity) []string {
 	queries := make([]string, 0, 5)
 	if identity.mediaType == "movie" {
 		if actorText != "" {
-			queries = append(queries, fmt.Sprintf("%s hindi %s full movie hd 1080", title, actorText))
+			queries = append(queries, fmt.Sprintf("%s hindi %s full movie hd 1080", titleYear, actorText))
 		} else {
 			queries = append(queries, fmt.Sprintf("%s full movie hindi 1080p", titleYear))
 		}
@@ -131,7 +131,7 @@ func buildYouTubeQueries(identity youtubeIdentity) []string {
 			fmt.Sprintf("%s full movie hindi dubbed", titleYear),
 			fmt.Sprintf("%s full movie 1080p", titleYear),
 			fmt.Sprintf("%s full movie", titleYear),
-			fmt.Sprintf("%s full movie hindi", title),
+			fmt.Sprintf("%s full movie hindi", titleYear),
 		)
 		if identity.originalTitle != "" && normalizeYouTubeText(identity.originalTitle) != normalizeYouTubeText(title) {
 			queries = append(queries, fmt.Sprintf("%s %s full movie hindi hd", identity.originalTitle, identity.year))
@@ -204,6 +204,11 @@ func youtubeVideoMatches(video youtube.Video, identity youtubeIdentity) bool {
 	if identity.runtimeMinutes > 0 && float64(video.Seconds)/60 > identity.runtimeMinutes*2.5 {
 		return false
 	}
+	if identity.mediaType == "movie" {
+		if hasYear, matches := youtubeTitleYearMatch(video.Title, identity.year); hasYear && !matches {
+			return false
+		}
+	}
 	title := normalizeYouTubeText(video.Title)
 	for _, blocked := range []string{
 		"trailer", "teaser", "promo", "clip", "review", "reaction", "recap", "explained",
@@ -242,6 +247,11 @@ func scoreYouTubeVideo(video youtube.Video, identity youtubeIdentity, queryIndex
 	}
 	if video.Verified {
 		score += 15
+	}
+	if identity.mediaType == "movie" {
+		if hasYear, matches := youtubeTitleYearMatch(video.Title, identity.year); hasYear && matches {
+			score += 25
+		}
 	}
 	if identity.runtimeMinutes > 0 {
 		difference := absFloat(float64(video.Seconds)/60 - identity.runtimeMinutes)
@@ -291,6 +301,24 @@ func youtubeTitleSimilarity(videoTitle, targetTitle string) float64 {
 	return float64(matched) / float64(len(words))
 }
 
+var youtubeYearPattern = regexp.MustCompile(`\b(?:18|19|20)[0-9]{2}\b`)
+
+func youtubeTitleYearMatch(videoTitle, expectedYear string) (hasYear, matches bool) {
+	if expectedYear == "" {
+		return false, false
+	}
+	years := youtubeYearPattern.FindAllString(videoTitle, -1)
+	if len(years) == 0 {
+		return false, false
+	}
+	for _, year := range years {
+		if year == expectedYear {
+			return true, true
+		}
+	}
+	return true, false
+}
+
 var nonWordYouTubeChars = regexp.MustCompile(`[^\p{L}\p{N}]+`)
 
 func normalizeYouTubeText(value string) string {
@@ -320,6 +348,7 @@ func (h *ContentHandler) persistYouTubeSource(ctx context.Context, tmdbID int64,
 		set[prefix+"sources.youtube"] = bson.A{url}
 		set[prefix+"youtubeDurationSeconds"] = video.Seconds
 		set[prefix+"youtubeTargetRuntimeMinutes"] = identity.runtimeMinutes
+		set[prefix+"youtubeTargetYear"] = identity.year
 		set[prefix+"youtubeTitle"] = video.Title
 		set[prefix+"updatedAt"] = now
 		setOnInsert["title"] = identity.title
@@ -329,6 +358,7 @@ func (h *ContentHandler) persistYouTubeSource(ctx context.Context, tmdbID int64,
 		set["sources.youtube"] = bson.A{url}
 		set["youtubeDurationSeconds"] = video.Seconds
 		set["youtubeTargetRuntimeMinutes"] = identity.runtimeMinutes
+		set["youtubeTargetYear"] = identity.year
 		set["youtubeTitle"] = video.Title
 		setOnInsert["title"] = identity.title
 	}
@@ -355,12 +385,22 @@ func maxFloat(left, right float64) float64 {
 	return right
 }
 
-func isYouTubeFullSource(sourceRecord map[string]any, runtimeMinutes float64) bool {
+func isYouTubeFullSource(sourceRecord map[string]any, runtimeMinutes float64, mediaType string) bool {
 	seconds := int(getFloat(sourceRecord["youtubeDurationSeconds"]))
 	targetRuntime := getFloat(sourceRecord["youtubeTargetRuntimeMinutes"])
 	title := fmt.Sprint(sourceRecord["youtubeTitle"])
+	targetYearValue, hasTargetYear := sourceRecord["youtubeTargetYear"]
+	targetYear := strings.TrimSpace(fmt.Sprint(targetYearValue))
+	if !hasTargetYear || targetYear == "<nil>" {
+		return false
+	}
 	if seconds < minimumYouTubeMovieSeconds || title == "<nil>" || hasYouTubePhrase(normalizeYouTubeText(title), "trailer") {
 		return false
+	}
+	if mediaType == "movie" && targetYear != "" {
+		if hasYear, matches := youtubeTitleYearMatch(title, targetYear); hasYear && !matches {
+			return false
+		}
 	}
 	if targetRuntime > 0 && float64(seconds)/60 < targetRuntime*0.75 {
 		return false
