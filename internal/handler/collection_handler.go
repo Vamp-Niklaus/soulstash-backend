@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 
 	"soulstash/internal/domain"
 	"soulstash/internal/middleware"
+	"soulstash/internal/repository"
 	"soulstash/internal/service"
 
 	"github.com/go-chi/chi/v5"
@@ -16,10 +18,15 @@ import (
 type CollectionHandler struct {
 	svc       service.CollectionService
 	jwtSecret string
+	userRepo  repository.UserRepository
 }
 
-func NewCollectionHandler(svc service.CollectionService, jwtSecret string) *CollectionHandler {
-	return &CollectionHandler{svc: svc, jwtSecret: jwtSecret}
+func NewCollectionHandler(svc service.CollectionService, jwtSecret string, userRepos ...repository.UserRepository) *CollectionHandler {
+	handler := &CollectionHandler{svc: svc, jwtSecret: jwtSecret}
+	if len(userRepos) > 0 {
+		handler.userRepo = userRepos[0]
+	}
+	return handler
 }
 
 func (h *CollectionHandler) RegisterRoutes(r chi.Router) {
@@ -585,6 +592,15 @@ func (h *CollectionHandler) GetPublicCollection(w http.ResponseWriter, r *http.R
 	collectionName := chi.URLParam(r, "collectionName")
 
 	col, err := h.svc.GetPublicCollection(r.Context(), username, collectionName)
+	if err != nil && h.isAdminRequest(r) {
+		if adminReader, ok := h.svc.(interface {
+			GetCollectionForAdmin(context.Context, string, string) (*domain.UserCollection, error)
+		}); ok {
+			if adminCollection, adminErr := adminReader.GetCollectionForAdmin(r.Context(), username, collectionName); adminErr == nil {
+				col, err = adminCollection, nil
+			}
+		}
+	}
 	if err != nil {
 		handleServiceError(w, err)
 		return
@@ -602,6 +618,15 @@ func (h *CollectionHandler) GetPublicCollection(w http.ResponseWriter, r *http.R
 		"createdAt":   col.CreatedAt,
 		"updatedAt":   col.UpdatedAt,
 	}})
+}
+
+func (h *CollectionHandler) isAdminRequest(r *http.Request) bool {
+	claims := middleware.GetUserFromContext(r.Context())
+	if claims == nil || h.userRepo == nil {
+		return false
+	}
+	user, err := h.userRepo.FindByID(r.Context(), claims.UserID)
+	return err == nil && user != nil && user.Admin
 }
 
 func collectionResponseID(col *domain.UserCollection) any {

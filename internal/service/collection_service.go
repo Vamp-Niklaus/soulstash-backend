@@ -537,6 +537,22 @@ func (s *collectionService) GetPublicCollection(ctx context.Context, username, c
 	return nil, domain.NewAppError(domain.ErrNotFound, "Collection not found", 404)
 }
 
+// GetCollectionForAdmin allows an authenticated administrator to inspect a
+// user's collection regardless of its visibility. Mutations still use the
+// normal owner-scoped collection methods.
+func (s *collectionService) GetCollectionForAdmin(ctx context.Context, username, collectionName string) (*domain.UserCollection, error) {
+	user, err := s.repo.GetUser(ctx, username)
+	if err != nil {
+		return nil, domain.NewAppError(domain.ErrNotFound, "User not found", 404)
+	}
+	for _, collection := range user.Collections {
+		if collection.Name == collectionName {
+			return &collection, nil
+		}
+	}
+	return nil, domain.NewAppError(domain.ErrNotFound, "Collection not found", 404)
+}
+
 func (s *collectionService) GetPublishedCollections(ctx context.Context) ([]map[string]any, error) {
 	return s.repo.GetPublishedCollections(ctx)
 }

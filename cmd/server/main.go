@@ -94,7 +94,7 @@ func main() {
 
 	// Handlers
 	authHandler := handler.NewAuthHandler(authSvc, cfg.JWTSecret)
-	collectionHandler := handler.NewCollectionHandler(collectionSvc, cfg.JWTSecret)
+	collectionHandler := handler.NewCollectionHandler(collectionSvc, cfg.JWTSecret, userRepo)
 	contentHandler := handler.NewContentHandler(tmdbClient, ratingsSvc, adultEngine, userRepo, cfg.JWTSecret, cfg.WatchmodeAPIKey)
 	if mongoClient != nil {
 		contentHandler.SetDatabase(mongoClient.Database())
