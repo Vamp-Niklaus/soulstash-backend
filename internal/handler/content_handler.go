@@ -1540,10 +1540,23 @@ func (h *ContentHandler) GetPlayerSources(w http.ResponseWriter, r *http.Request
 	}
 
 	var youtubeURL string
-	if urls := sanitizePlayerProviderURLs(providerMap["youtube"]); len(urls) > 0 {
+	if urls := sanitizePlayerProviderURLs(providerMap["youtube"]); len(urls) > 0 && isYouTubeFullSource(sourceRecord, 0) {
 		youtubeURL = urls[0]
 	}
 	knownProviders["youtube"] = struct{}{}
+	if youtubeURL == "" {
+		if video, identity := h.findFullYouTubeVideo(r.Context(), tmdbID, mediaType, season, episode); video != nil {
+			youtubeURL = youtubeWatchURL(video.ID)
+			if sourceRecord == nil {
+				sourceRecord = make(map[string]any)
+			}
+			sourceRecord["youtubeDurationSeconds"] = video.Seconds
+			sourceRecord["youtubeTargetRuntimeMinutes"] = identity.runtimeMinutes
+			sourceRecord["youtubeTitle"] = video.Title
+			sourceRecord["updatedAt"] = time.Now()
+			h.persistYouTubeSource(r.Context(), parsedID, identity, *video)
+		}
+	}
 	if youtubeURL == "" {
 		endpoints := make([]string, 0, 3)
 		if mediaType == "series" {
@@ -1990,6 +2003,8 @@ func getFloat(v any) float64 {
 	case float32:
 		return float64(val)
 	case int:
+		return float64(val)
+	case int32:
 		return float64(val)
 	case int64:
 		return float64(val)
