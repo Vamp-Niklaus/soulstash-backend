@@ -915,11 +915,21 @@ func (h *ContentHandler) GetGenres(w http.ResponseWriter, r *http.Request) {
 		"name": "Bollywood",
 	})
 
+	hiddenGenres := map[float64]bool{
+		10763: true, // News
+		10764: true, // Reality
+		10766: true, // Soap
+		10767: true, // Talk
+	}
+
 	if movieData != nil {
 		if genres, ok := movieData["genres"].([]any); ok {
 			for _, g := range genres {
 				if gMap, ok := g.(map[string]any); ok {
 					id := getFloat(gMap["id"])
+					if hiddenGenres[id] {
+						continue
+					}
 					seen[id] = true
 					combined = append(combined, g)
 				}
@@ -931,6 +941,9 @@ func (h *ContentHandler) GetGenres(w http.ResponseWriter, r *http.Request) {
 			for _, g := range genres {
 				if gMap, ok := g.(map[string]any); ok {
 					id := getFloat(gMap["id"])
+					if hiddenGenres[id] {
+						continue
+					}
 					if !seen[id] {
 						seen[id] = true
 						combined = append(combined, g)
