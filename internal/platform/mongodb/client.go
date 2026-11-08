@@ -84,7 +84,7 @@ func (c *Client) InitIndexes(ctx context.Context) error {
 	// Enforce the same case-insensitive uniqueness used by signup checks.
 	caseInsensitive := &options.Collation{Locale: "en", Strength: 2}
 	_, err = usersCol.Indexes().CreateOne(initCtx, mongo.IndexModel{
-		Keys: bson.D{{Key: "username", Value: 1}},
+		Keys:    bson.D{{Key: "username", Value: 1}},
 		Options: options.Index().SetUnique(true).SetName("username_case_insensitive_unique_index").SetCollation(caseInsensitive),
 	})
 	if err != nil {
