@@ -282,6 +282,7 @@ func TestContentHandler_DiscoverBollywoodUsesFourMonthWindow(t *testing.T) {
 				for i := range results {
 					results[i] = map[string]any{
 						"id": float64(i + 1), "title": "Film", "adult": false,
+						"poster_path":  "/film.jpg",
 						"release_date": "2026-10-01", "original_language": "hi",
 						"origin_country": []any{"IN"}, "popularity": float64(100 - i),
 					}
@@ -326,8 +327,8 @@ func TestContentHandler_DiscoverFiltersAnimeUsingMovieProductionCountries(t *tes
 		getFunc: func(_ context.Context, endpoint string, _ map[string]string) (map[string]any, error) {
 			if strings.Contains(endpoint, "/movie") {
 				return map[string]any{"total_pages": float64(1), "results": []any{
-					map[string]any{"id": float64(1), "title": "Anime", "original_language": "ja", "genre_ids": []any{float64(16)}, "production_countries": []any{map[string]any{"iso_3166_1": "JP"}}},
-					map[string]any{"id": float64(2), "title": "Animation", "original_language": "en", "genre_ids": []any{float64(16)}, "production_countries": []any{map[string]any{"iso_3166_1": "US"}}},
+					map[string]any{"id": float64(1), "title": "Anime", "poster_path": "/anime.jpg", "original_language": "ja", "genre_ids": []any{float64(16)}, "production_countries": []any{map[string]any{"iso_3166_1": "JP"}}},
+					map[string]any{"id": float64(2), "title": "Animation", "poster_path": "/animation.jpg", "original_language": "en", "genre_ids": []any{float64(16)}, "production_countries": []any{map[string]any{"iso_3166_1": "US"}}},
 				}}, nil
 			}
 			return map[string]any{"total_pages": float64(1), "results": []any{}}, nil
