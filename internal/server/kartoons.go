@@ -141,6 +141,13 @@ func (s *Server) handleKartoonsResolveStream(w http.ResponseWriter, r *http.Requ
 		playable = append(playable, kartoonsStream{URL: playableURL, Label: label})
 	}
 
+	if len(playable) == 0 {
+		s.logger.Warn("[Kartoons Stream Resolver] no playable streams",
+			slog.Int("upstreamStatus", status), slog.Int("bodyLen", len(body)))
+		writeJSON(http.StatusBadGateway, map[string]any{"success": false, "streams": []kartoonsStream{}})
+		return
+	}
+
 	writeJSON(http.StatusOK, map[string]any{"success": true, "streams": playable})
 }
 
