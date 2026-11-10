@@ -734,7 +734,7 @@ func (h *ContentHandler) GetSeriesDetail(w http.ResponseWriter, r *http.Request)
 func (h *ContentHandler) GetSeriesSeason(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	season := chi.URLParam(r, "seasonNumber")
-	h.fetchProxy(w, r, fmt.Sprintf("/3/tv/%s/season/%s", id, season))
+	h.seriesSeasonWithKartoons(w, r, id, season)
 }
 
 func (h *ContentHandler) GetPersonDetail(w http.ResponseWriter, r *http.Request) {
