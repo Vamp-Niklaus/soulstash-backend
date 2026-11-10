@@ -715,6 +715,7 @@ func (h *ContentHandler) GetSeriesDetail(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusNotFound, "Series not found")
 		return
 	}
+	ksMergeSeriesDetail(r.Context(), data)
 	h.filterDetailRelatedContent(r, data, false)
 
 	tmdbID, _ := strconv.Atoi(id)

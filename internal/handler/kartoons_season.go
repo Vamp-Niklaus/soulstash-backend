@@ -14,20 +14,19 @@ import (
 	"time"
 )
 
-// Season merge for GET /api/series/:id/season/:seasonNumber.
+// Kartoons merge for series detail and season endpoints.
 //
-// Series match: normalized titles must be exactly equal (text in parentheses
-// counts as an alternate title, e.g. "Pakdam Pakdai (Rat-A-Tat)" matches both
-// "Pakdam Pakdai" and "Rat-A-Tat"). Years are compared only when both sides have one.
+// Series match: normalized titles must be exactly equal. Text in parentheses counts
+// as an alternate title ("Pakdam Pakdai (Rat-A-Tat)" matches "Pakdam Pakdai" and
+// "Rat-A-Tat"). Years are compared only when both sides have one. Posters are ignored.
 //
-// Episode union per season:
-//   - The source with more episodes that season is the priority source; ties go to TMDB.
-//   - Same episode number and same normalized title: one entry, with fields from the
-//     priority source and any empty field filled from the other, plus both stream sources.
-//   - Same episode number, different title: both are kept as separate entries.
-//   - Episode number present in only one source: that episode is kept.
+// Series detail: the title comes from Kartoons when matched. Seasons are the union of
+// TMDB seasons and Kartoons seasons; a season that exists only on Kartoons is added.
 //
-// Ids: SxEy-tmdb, SxEy-kartoon, or SxEy-<priority> for merged entries.
+// Season episodes: the source with more episodes that season is the priority, ties go
+// to TMDB. Same number and same title become one entry (fields from priority, empty
+// ones filled from the other). Same number, different title stay as separate entries.
+// Ids are SxEy-tmdb, SxEy-kartoon, or SxEy-<priority>. Episode numbers are never decimal.
 
 var ksHTTP = &http.Client{Timeout: 10 * time.Second}
 
@@ -39,7 +38,8 @@ var (
 	ksSeasonSuffix = regexp.MustCompile(`(?i)\s*Season\s*\d+.*$`)
 )
 
-// seriesSeasonWithKartoons replaces the plain TMDB season proxy.
+// seriesSeasonWithKartoons serves GET /series/{id}/season/{seasonNumber}.
+// Works for seasons TMDB has and for seasons only Kartoons has.
 func (h *ContentHandler) seriesSeasonWithKartoons(w http.ResponseWriter, r *http.Request, id, season string) {
 	seasonNumber, err := strconv.Atoi(season)
 	if err != nil || seasonNumber <= 0 {
@@ -48,14 +48,14 @@ func (h *ContentHandler) seriesSeasonWithKartoons(w http.ResponseWriter, r *http
 	}
 
 	ctx := r.Context()
-	data, err := h.tmdbClient.Get(ctx, fmt.Sprintf("/3/tv/%s/season/%d", id, seasonNumber), requestQueryParams(r))
-	if err != nil {
-		writeError(w, http.StatusNotFound, "Season not found")
-		return
+	var tmdbEps []map[string]any
+	data, tmdbErr := h.tmdbClient.Get(ctx, fmt.Sprintf("/3/tv/%s/season/%d", id, seasonNumber), requestQueryParams(r))
+	if tmdbErr != nil || data == nil {
+		data = map[string]any{"season_number": seasonNumber, "name": fmt.Sprintf("Season %d", seasonNumber)}
+	} else {
+		rawEps, _ := data["episodes"].([]any)
+		tmdbEps = ksMaps(rawEps)
 	}
-
-	rawEps, _ := data["episodes"].([]any)
-	tmdbEps := ksMaps(rawEps)
 
 	q := r.URL.Query()
 	year := ksYear(q.Get("year"))
@@ -67,18 +67,89 @@ func (h *ContentHandler) seriesSeasonWithKartoons(w http.ResponseWriter, r *http
 		}
 	}
 
-	tmdbEps = ksMergeSeason(ctx, tmdbEps, names, year, seasonNumber)
+	merged := ksMergeSeason(ctx, tmdbEps, names, year, seasonNumber)
+	if tmdbErr != nil && len(merged) == 0 {
+		writeError(w, http.StatusNotFound, "Season not found")
+		return
+	}
 
-	episodes := make([]any, 0, len(tmdbEps))
-	for _, ep := range tmdbEps {
+	episodes := make([]any, 0, len(merged))
+	for _, ep := range merged {
 		episodes = append(episodes, ep)
 	}
 	data["episodes"] = episodes
 	writeJSON(w, http.StatusOK, data)
 }
 
-// ksMergeSeason finds the Kartoons show and unions its season episodes with TMDB's.
-// Any failure returns the TMDB episodes unchanged.
+// ksMergeSeriesDetail updates a TMDB series detail in place with the Kartoons title and seasons.
+// It does nothing when no Kartoons show matches.
+func ksMergeSeriesDetail(ctx context.Context, data map[string]any) {
+	names := []string{ksString(data["name"]), ksString(data["original_name"])}
+	year := ksYear(ksString(data["first_air_date"]))
+
+	show, ok := ksFindShow(ctx, names, year)
+	if !ok {
+		return
+	}
+	slug := ksString(show["slug"])
+
+	if title := strings.TrimSpace(ksString(show["title"])); title != "" {
+		data["name"] = title
+	}
+	data["kartoons_slug"] = slug
+	data["kartoons_id"] = ksString(show["_id"])
+
+	kSeasons := ksShowSeasons(ctx, slug)
+	if len(kSeasons) == 0 {
+		return
+	}
+
+	rawSeasons, _ := data["seasons"].([]any)
+	seasons := ksMaps(rawSeasons)
+	byNum := map[int]int{}
+	for i, s := range seasons {
+		byNum[int(ksNumber(s["season_number"]))] = i
+	}
+
+	for _, ks := range kSeasons {
+		n := int(ksNumber(ks["seasonNumber"]))
+		if n < 0 {
+			continue
+		}
+		kCount := int(ksNumber(ks["episodeCount"]))
+		if idx, exists := byNum[n]; exists {
+			if kCount > int(ksNumber(seasons[idx]["episode_count"])) {
+				seasons[idx]["episode_count"] = kCount
+			}
+			continue
+		}
+		seasons = append(seasons, map[string]any{
+			"id":            fmt.Sprintf("kartoons-%s-s%d", slug, n),
+			"season_number": n,
+			"name":          fmt.Sprintf("Season %d", n),
+			"overview":      "",
+			"air_date":      nil,
+			"poster_path":   ksTMDBPath(ksFirstNonEmpty(ks["image"], show["image"])),
+			"episode_count": kCount,
+			"source":        "kartoon",
+		})
+		byNum[n] = len(seasons) - 1
+	}
+
+	sort.SliceStable(seasons, func(i, j int) bool {
+		return ksNumber(seasons[i]["season_number"]) < ksNumber(seasons[j]["season_number"])
+	})
+
+	out := make([]any, 0, len(seasons))
+	for _, s := range seasons {
+		out = append(out, s)
+	}
+	data["seasons"] = out
+	data["number_of_seasons"] = len(seasons)
+}
+
+// ksMergeSeason returns the TMDB episodes unioned with the Kartoons episodes for one season.
+// If no show matches or Kartoons has no episodes for the season, the input is returned unchanged.
 func ksMergeSeason(ctx context.Context, tmdbEps []map[string]any, names []string, year, seasonNumber int) []map[string]any {
 	show, ok := ksFindShow(ctx, names, year)
 	if !ok {
@@ -88,15 +159,12 @@ func ksMergeSeason(ctx context.Context, tmdbEps []map[string]any, names []string
 
 	kEps := ksSeasonEpisodes(ctx, slug, seasonNumber)
 	if len(kEps) == 0 {
-		kEps = ksFallbackSeasonEpisodes(ctx, slug, seasonNumber)
-	}
-	if len(kEps) == 0 {
 		return tmdbEps
 	}
 	return ksUnionEpisodes(tmdbEps, kEps, slug, seasonNumber)
 }
 
-// ksFindShow searches Kartoons by each title and returns the first show that matches exactly.
+// ksFindShow searches Kartoons by each title and returns the first show that matches.
 func ksFindShow(ctx context.Context, names []string, year int) (map[string]any, bool) {
 	seenTerm := map[string]bool{}
 	var terms []string
@@ -223,7 +291,7 @@ func ksUnionEpisodes(tmdbEps []map[string]any, kEps []map[string]any, slug strin
 		}
 	}
 
-	// Kartoons episodes without a usable number are appended so they are not lost.
+	// Kartoons episodes without a number are kept at the end, without a number.
 	for i, k := range kNoNumber {
 		entry := ksBuildKartoon(k, slug, seasonNumber, 0)
 		entry["id"] = fmt.Sprintf("S%d-kartoon-x%d", seasonNumber, i+1)
@@ -285,8 +353,6 @@ func ksBuildMerged(t, k map[string]any, tmdbPriority bool, slug string, seasonNu
 			}
 		} else if !ksIsEmpty(kv) {
 			tEntry[field] = kv
-		} else {
-			tEntry[field] = tv
 		}
 	}
 
@@ -304,8 +370,8 @@ func ksBuildMerged(t, k map[string]any, tmdbPriority bool, slug string, seasonNu
 	return tEntry
 }
 
-// ksFallbackSeasonEpisodes uses the season that has episodes when the requested season is empty.
-func ksFallbackSeasonEpisodes(ctx context.Context, slug string, seasonNumber int) []map[string]any {
+// ksShowSeasons returns the season list of a Kartoons show.
+func ksShowSeasons(ctx context.Context, slug string) []map[string]any {
 	detail, ok := ksGet(ctx, "https://api.kartoons.me/api/shows/"+url.PathEscape(slug))
 	if !ok {
 		return nil
@@ -314,31 +380,7 @@ func ksFallbackSeasonEpisodes(ctx context.Context, slug string, seasonNumber int
 	if inner, ok := obj["data"].(map[string]any); ok {
 		obj = inner
 	}
-	seasons := ksItems(obj["seasons"])
-
-	var target map[string]any
-	for _, s := range seasons {
-		if ksNumber(s["seasonNumber"]) == float64(seasonNumber) {
-			target = s
-			break
-		}
-	}
-	if target == nil {
-		for _, s := range seasons {
-			if ksNumber(s["episodeCount"]) > 0 {
-				target = s
-				break
-			}
-		}
-	}
-	if target == nil {
-		return nil
-	}
-	sNum := int(ksNumber(target["seasonNumber"]))
-	if sNum == 0 {
-		sNum = 1
-	}
-	return ksSeasonEpisodes(ctx, slug, sNum)
+	return ksItems(obj["seasons"])
 }
 
 func ksSeasonEpisodes(ctx context.Context, slug string, seasonNumber int) []map[string]any {
@@ -347,6 +389,17 @@ func ksSeasonEpisodes(ctx context.Context, slug string, seasonNumber int) []map[
 		return nil
 	}
 	return ksItems(payload, "data", "episodes")
+}
+
+// ksTMDBPath converts a full TMDB image URL to the path form TMDB uses (/abc.jpg).
+func ksTMDBPath(v string) string {
+	if i := strings.Index(v, "image.tmdb.org/t/p/"); i >= 0 {
+		rest := v[i+len("image.tmdb.org/t/p/"):]
+		if slash := strings.Index(rest, "/"); slash >= 0 {
+			return rest[slash:]
+		}
+	}
+	return v
 }
 
 // ksNormalize lowercases, folds punctuation and "&", and drops articles.
