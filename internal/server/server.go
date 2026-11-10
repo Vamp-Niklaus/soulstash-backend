@@ -164,7 +164,7 @@ func (s *Server) setupRoutes(deps *HandlerDeps) {
 
 	s.router.Get("/api/kartoons/resolve-stream", s.handleKartoonsResolveStream)
 
-		// Image proxy endpoint matching Node server.js:203
+	// Image proxy endpoint matching Node server.js:203
 	s.router.Get("/image/{path}", func(w http.ResponseWriter, req *http.Request) {
 		imagePath := chi.URLParam(req, "path")
 		w.Header().Set("Content-Type", "application/json")
