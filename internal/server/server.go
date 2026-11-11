@@ -15,6 +15,7 @@ import (
 	"soulstash/internal/config"
 	"soulstash/internal/handler"
 	"soulstash/internal/middleware"
+	"soulstash/internal/platform/kartoons"
 	"soulstash/internal/platform/traffic"
 
 	"github.com/go-chi/chi/v5"
@@ -163,6 +164,7 @@ func (s *Server) setupRoutes(deps *HandlerDeps) {
 	}
 
 	s.router.Get("/api/kartoons/resolve-stream", s.handleKartoonsResolveStream)
+	s.router.Get("/api/kartoons/proxy/*", s.handleKartoonsProxy)
 
 	// Image proxy endpoint matching Node server.js:203
 	s.router.Get("/image/{path}", func(w http.ResponseWriter, req *http.Request) {
@@ -236,16 +238,29 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, req *http.Request) {
+	startKartoonsMaintenance()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"status":    "OK",
 		"service":   "soulstash-backend",
 		"timestamp": time.Now().UTC().Format(time.RFC3339Nano),
+		"kartoons":  kartoons.Default.Status(),
 	})
 }
 
+// startKartoonsMaintenance checks and renews the Kartoons tokens in the background, so the
+// cron ping stays fast. Overlapping pings are ignored by the manager.
+func startKartoonsMaintenance() {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		kartoons.Default.Maintain(ctx)
+	}()
+}
+
 func (s *Server) handleCronHealth(w http.ResponseWriter, req *http.Request) {
+	startKartoonsMaintenance()
 	uptime := time.Since(s.startTime)
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
@@ -308,6 +323,7 @@ func (s *Server) handleCronHealth(w http.ResponseWriter, req *http.Request) {
 		"memory_alloc_mb":   allocMB,
 		"goroutines":        goroutines,
 		"render_keep_alive": true,
+		"kartoons":          kartoons.Default.Status(),
 	})
 }
 

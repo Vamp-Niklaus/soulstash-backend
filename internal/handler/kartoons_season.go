@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"soulstash/internal/platform/kartoons"
 )
 
 // Kartoons merge for series detail and season endpoints.
@@ -429,7 +431,7 @@ func ksGet(ctx context.Context, rawURL string) (any, bool) {
 	}
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := ksHTTP.Do(req)
+	resp, err := kartoons.Default.Do(ksHTTP, req)
 	if err != nil {
 		return nil, false
 	}

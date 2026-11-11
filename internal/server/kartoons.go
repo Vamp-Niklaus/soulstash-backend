@@ -11,6 +11,10 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"soulstash/internal/platform/kartoons"
+
+	"github.com/go-chi/chi/v5"
 )
 
 // kartoonsToken is the Stremio addon token used by the Kartoons source.
@@ -73,10 +77,7 @@ func (s *Server) handleKartoonsResolveStream(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	token := os.Getenv("KARTOONS_TOKEN")
-	if token == "" {
-		token = kartoonsTokenFallback
-	}
+	token := kartoonsStremioToken()
 	stremioURL := "https://api.kartoons.me/api/stremio/stream/" +
 		url.PathEscape(typ) + "/" + url.PathEscape(targetID) + ".json?token=" + url.QueryEscape(token)
 
@@ -151,6 +152,72 @@ func (s *Server) handleKartoonsResolveStream(w http.ResponseWriter, r *http.Requ
 	writeJSON(http.StatusOK, map[string]any{"success": true, "streams": playable})
 }
 
+// kartoonsStremioToken is the Stremio addon token (env KARTOONS_TOKEN, else the fallback).
+func kartoonsStremioToken() string {
+	if token := os.Getenv("KARTOONS_TOKEN"); token != "" {
+		return token
+	}
+	return kartoonsTokenFallback
+}
+
+// handleKartoonsProxy serves GET /api/kartoons/proxy/*. The frontend calls this instead of
+// api.kartoons.me, so the backend adds the bearer (and the Stremio token) and the browser
+// never needs one. Only the catalog paths the app uses are allowed.
+func (s *Server) handleKartoonsProxy(w http.ResponseWriter, r *http.Request) {
+	fail := func(status int, msg string) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "message": msg})
+	}
+
+	rest := strings.Trim(chi.URLParam(r, "*"), "/")
+	if rest == "" || strings.Contains(rest, "..") || strings.ContainsAny(rest, "\\?#") {
+		fail(http.StatusBadRequest, "Invalid path")
+		return
+	}
+	first := strings.SplitN(rest, "/", 2)[0]
+	if first != "shows" && first != "movies" && first != "stremio" {
+		fail(http.StatusForbidden, "Path not allowed")
+		return
+	}
+
+	q := r.URL.Query()
+	q.Del("token")
+	if first == "stremio" {
+		q.Set("token", kartoonsStremioToken())
+	}
+
+	var (
+		body   []byte
+		status int
+		err    error
+	)
+	for _, host := range []string{"api.kartoons.me", "api.kartoons.to"} {
+		u := url.URL{Scheme: "https", Host: host, Path: "/api/" + rest, RawQuery: q.Encode()}
+		body, status, err = kartoonsFetch(r.Context(), u.String(), map[string]string{"Accept": "application/json"}, 10*time.Second)
+		if err == nil && status != http.StatusNotFound && status < 500 {
+			break
+		}
+	}
+	if err != nil {
+		s.logger.Warn("[Kartoons Proxy] upstream error", slog.String("path", rest), slog.String("error", err.Error()))
+		fail(http.StatusBadGateway, "Kartoons is unreachable")
+		return
+	}
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		s.logger.Warn("[Kartoons Proxy] upstream rejected the token", slog.Int("status", status))
+		fail(http.StatusBadGateway, "Kartoons authentication failed")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if status == http.StatusOK {
+		w.Header().Set("Cache-Control", "public, max-age=60")
+	}
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
+}
+
 // kartoonsFetch performs a GET with a timeout and returns the body (capped at 2 MB).
 func kartoonsFetch(parent context.Context, rawURL string, headers map[string]string, timeout time.Duration) ([]byte, int, error) {
 	ctx, cancel := context.WithTimeout(parent, timeout)
@@ -164,12 +231,12 @@ func kartoonsFetch(parent context.Context, rawURL string, headers map[string]str
 		req.Header.Set(k, v)
 	}
 
-	resp, err := kartoonsHTTP.Do(req)
+	resp, err := kartoons.Default.Do(kartoonsHTTP, req)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	return body, resp.StatusCode, err
 }

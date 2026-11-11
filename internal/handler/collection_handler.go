@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"soulstash/internal/domain"
 	"soulstash/internal/middleware"
@@ -656,8 +657,30 @@ func (h *CollectionHandler) GetPublishedCollections(w http.ResponseWriter, r *ht
 		handleServiceError(w, err)
 		return
 	}
+	// Optional ?q= filters by collection name, description or publisher username.
+	// Without q the response is unchanged, so the home page keeps working.
+	if q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q"))); q != "" {
+		filtered := make([]map[string]any, 0, len(cols))
+		for _, entry := range cols {
+			if publishedEntryMatches(entry, q) {
+				filtered = append(filtered, entry)
+			}
+		}
+		cols = filtered
+	}
 	writeJSON(w, http.StatusOK, cols)
 }
+
+func publishedEntryMatches(entry map[string]any, q string) bool {
+	username, _ := entry["username"].(string)
+	col, _ := entry["collection"].(map[string]any)
+	name, _ := col["name"].(string)
+	desc, _ := col["description"].(string)
+	return strings.Contains(strings.ToLower(name), q) ||
+		strings.Contains(strings.ToLower(desc), q) ||
+		strings.Contains(strings.ToLower(username), q)
+}
+
 
 func getClientCollectionVersion(r *http.Request) *int {
 	raw := r.Header.Get("X-Collection-Version")

@@ -11,6 +11,7 @@ import (
 	"soulstash/internal/config"
 	"soulstash/internal/handler"
 	"soulstash/internal/platform/email"
+	"soulstash/internal/platform/kartoons"
 	"soulstash/internal/platform/mongodb"
 	"soulstash/internal/platform/tmdb"
 	"soulstash/internal/platform/traffic"
@@ -64,6 +65,7 @@ func main() {
 		}
 
 		trafficBuf = traffic.NewBuffer(mongoClient.Database(), logger)
+			kartoons.Default.UseStore(context.Background(), kartoons.NewMongoStore(mongoClient.Database()), logger)
 	} else {
 		logger.Warn("Running without MongoDB connection (test/mock mode)")
 	}
