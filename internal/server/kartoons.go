@@ -120,7 +120,7 @@ func (s *Server) handleKartoonsResolveStream(w http.ResponseWriter, r *http.Requ
 
 		// Follow the worker hop: the URL may return a text body whose first
 		// http line is the real playable URL.
-		if hopBody, hopStatus, hopErr := kartoonsFetch(ctx, st.URL, hopHeaders, 5*time.Second); hopErr == nil && hopStatus == http.StatusOK {
+		if hopBody, hopStatus, hopErr := kartoonsFetch(ctx, st.URL, hopHeaders, 5*time.Second); hopErr == nil && hopStatus == http.StatusOK && !strings.HasPrefix(strings.TrimSpace(string(hopBody)), "#EXTM3U") {
 			for _, line := range strings.Split(string(hopBody), "\n") {
 				line = strings.TrimSpace(line)
 				if strings.HasPrefix(line, "http") {

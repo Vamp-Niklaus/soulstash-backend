@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -673,12 +674,46 @@ func (h *CollectionHandler) GetPublishedCollections(w http.ResponseWriter, r *ht
 
 func publishedEntryMatches(entry map[string]any, q string) bool {
 	username, _ := entry["username"].(string)
-	col, _ := entry["collection"].(map[string]any)
+	col := publishedAsMap(entry["collection"])
 	name, _ := col["name"].(string)
 	desc, _ := col["description"].(string)
 	return strings.Contains(strings.ToLower(name), q) ||
 		strings.Contains(strings.ToLower(desc), q) ||
 		strings.Contains(strings.ToLower(username), q)
+}
+
+// publishedAsMap converts a nested Mongo document to map[string]any. The driver decodes
+// nested documents as bson.M or bson.D (not map[string]any), so a plain type assertion fails.
+func publishedAsMap(v any) map[string]any {
+	if m, ok := v.(map[string]any); ok {
+		return m
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Map:
+		out := make(map[string]any, rv.Len())
+		iter := rv.MapRange()
+		for iter.Next() {
+			out[fmt.Sprint(iter.Key().Interface())] = iter.Value().Interface()
+		}
+		return out
+	case reflect.Slice:
+		out := make(map[string]any, rv.Len())
+		for i := 0; i < rv.Len(); i++ {
+			el := rv.Index(i)
+			if el.Kind() != reflect.Struct {
+				return nil
+			}
+			k := el.FieldByName("Key")
+			val := el.FieldByName("Value")
+			if !k.IsValid() || !val.IsValid() {
+				return nil
+			}
+			out[fmt.Sprint(k.Interface())] = val.Interface()
+		}
+		return out
+	}
+	return nil
 }
 
 func getClientCollectionVersion(r *http.Request) *int {
