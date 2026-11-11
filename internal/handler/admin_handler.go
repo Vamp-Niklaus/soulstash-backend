@@ -77,7 +77,7 @@ func (h *AdminHandler) RegisterRoutes(r chi.Router) {
 		// Adult keywords
 		admin.Get("/adult-keywords", h.GetAdultKeywords)
 		admin.Post("/adult-keywords", h.SaveAdultKeywords)
-			admin.Post("/adult-keywords/reset", h.ResetAdultKeywords)
+		admin.Post("/adult-keywords/reset", h.ResetAdultKeywords)
 		admin.Get("/kartoons-tokens", h.GetKartoonsTokens)
 		admin.Put("/kartoons-tokens", h.PutKartoonsTokens)
 		admin.Post("/kartoons-tokens/refresh", h.RefreshKartoonsTokens)

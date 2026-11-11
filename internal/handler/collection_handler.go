@@ -681,7 +681,6 @@ func publishedEntryMatches(entry map[string]any, q string) bool {
 		strings.Contains(strings.ToLower(username), q)
 }
 
-
 func getClientCollectionVersion(r *http.Request) *int {
 	raw := r.Header.Get("X-Collection-Version")
 	if raw == "" {

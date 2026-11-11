@@ -157,7 +157,6 @@ func (m *Manager) ForceRefresh(ctx context.Context) Snapshot {
 	return m.snapshotLocked()
 }
 
-
 // Enabled reports whether any token is configured.
 func (m *Manager) Enabled() bool {
 	m.mu.Lock()

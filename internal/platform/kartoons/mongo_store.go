@@ -80,4 +80,3 @@ func (s *MongoStore) Ensure(ctx context.Context) error {
 	)
 	return err
 }
-

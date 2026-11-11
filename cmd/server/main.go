@@ -65,7 +65,7 @@ func main() {
 		}
 
 		trafficBuf = traffic.NewBuffer(mongoClient.Database(), logger)
-			kartoons.Default.UseStore(context.Background(), kartoons.NewMongoStore(mongoClient.Database()), logger)
+		kartoons.Default.UseStore(context.Background(), kartoons.NewMongoStore(mongoClient.Database()), logger)
 	} else {
 		logger.Warn("Running without MongoDB connection (test/mock mode)")
 	}
