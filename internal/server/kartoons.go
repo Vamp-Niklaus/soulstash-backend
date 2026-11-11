@@ -10,6 +10,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"soulstash/internal/platform/kartoons"
@@ -81,7 +82,23 @@ func (s *Server) handleKartoonsResolveStream(w http.ResponseWriter, r *http.Requ
 	stremioURL := "https://api.kartoons.me/api/stremio/stream/" +
 		url.PathEscape(typ) + "/" + url.PathEscape(targetID) + ".json?token=" + url.QueryEscape(token)
 
-	body, status, err := kartoonsFetch(ctx, stremioURL, nil, 6*time.Second)
+	// One quick retry: the upstream occasionally hiccups, and the frontend would otherwise
+	// burn seconds re-requesting the whole resolve.
+	var (
+		body   []byte
+		status int
+		err    error
+	)
+	for attempt := 0; attempt < 2; attempt++ {
+		timeout := 6 * time.Second
+		if attempt > 0 {
+			timeout = 4 * time.Second
+		}
+		body, status, err = kartoonsFetch(ctx, stremioURL, nil, timeout)
+		if (err == nil && status < 500) || ctx.Err() != nil {
+			break
+		}
+	}
 	if err != nil {
 		s.logger.Warn("[Kartoons Stream Resolver] error", slog.String("error", err.Error()))
 		writeJSON(http.StatusInternalServerError, map[string]any{
@@ -105,31 +122,26 @@ func (s *Server) handleKartoonsResolveStream(w http.ResponseWriter, r *http.Requ
 	}
 	_ = json.Unmarshal(body, &stremio)
 
-	playable := make([]kartoonsStream, 0, len(stremio.Streams))
 	hopHeaders := map[string]string{
 		"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
 		"Origin":     "https://web.stremio.com",
 		"Referer":    "https://web.stremio.com/",
 	}
 
+	// Resolve every stream's worker hop in parallel (they used to run one after another,
+	// each up to 5s, which is what made multi-dub episodes slow to start). Capped so one
+	// request can't fan out unbounded.
+	type candidate struct {
+		url   string
+		label string
+	}
+	candidates := make([]candidate, 0, len(stremio.Streams))
+	seen := make(map[string]bool, len(stremio.Streams))
 	for _, st := range stremio.Streams {
-		if st.URL == "" {
+		if st.URL == "" || seen[st.URL] || len(candidates) >= 6 {
 			continue
 		}
-		playableURL := st.URL
-
-		// Follow the worker hop: the URL may return a text body whose first
-		// http line is the real playable URL.
-		if hopBody, hopStatus, hopErr := kartoonsFetch(ctx, st.URL, hopHeaders, 5*time.Second); hopErr == nil && hopStatus == http.StatusOK && !strings.HasPrefix(strings.TrimSpace(string(hopBody)), "#EXTM3U") {
-			for _, line := range strings.Split(string(hopBody), "\n") {
-				line = strings.TrimSpace(line)
-				if strings.HasPrefix(line, "http") {
-					playableURL = line
-					break
-				}
-			}
-		}
-
+		seen[st.URL] = true
 		label := st.Title
 		if label == "" {
 			label = st.Name
@@ -137,10 +149,25 @@ func (s *Server) handleKartoonsResolveStream(w http.ResponseWriter, r *http.Requ
 		if label == "" {
 			label = "Kartoon Stream"
 		}
-		label = strings.TrimSpace(kartoonsLabelSuffix.ReplaceAllString(label, ""))
-
-		playable = append(playable, kartoonsStream{URL: playableURL, Label: label})
+		candidates = append(candidates, candidate{
+			url:   st.URL,
+			label: strings.TrimSpace(kartoonsLabelSuffix.ReplaceAllString(label, "")),
+		})
 	}
+
+	playable := make([]kartoonsStream, len(candidates))
+	var wg sync.WaitGroup
+	for i, c := range candidates {
+		wg.Add(1)
+		go func(i int, c candidate) {
+			defer wg.Done()
+			playable[i] = kartoonsStream{
+				URL:   followKartoonsHop(ctx, c.url, hopHeaders),
+				Label: c.label,
+			}
+		}(i, c)
+	}
+	wg.Wait()
 
 	if len(playable) == 0 {
 		s.logger.Warn("[Kartoons Stream Resolver] no playable streams",
@@ -218,8 +245,47 @@ func (s *Server) handleKartoonsProxy(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
-// kartoonsFetch performs a GET with a timeout and returns the body (capped at 2 MB).
+// followKartoonsHop resolves a Stremio worker URL to the real playable URL. The worker either
+// returns the HLS playlist itself (keep the worker URL), or a tiny text body whose only line is
+// the real URL (use that). Anything else, or any failure, keeps the original URL so playback can
+// still be attempted. Bodies are capped at 64 KB so a playlist is never mistaken for a redirect.
+func followKartoonsHop(ctx context.Context, rawURL string, headers map[string]string) string {
+	body, status, err := kartoonsFetchLimit(ctx, rawURL, headers, 3*time.Second, 64<<10)
+	if err != nil || status != http.StatusOK {
+		return rawURL
+	}
+	if hop := parseKartoonsHop(body); hop != "" {
+		return hop
+	}
+	return rawURL
+}
+
+// parseKartoonsHop returns the redirect target when body is a bare-URL text response, else "".
+func parseKartoonsHop(body []byte) string {
+	text := strings.TrimSpace(strings.TrimPrefix(string(body), "\ufeff"))
+	if text == "" || strings.Contains(text, "#EXT") || strings.HasPrefix(text, "{") || strings.HasPrefix(text, "<") {
+		return ""
+	}
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if (strings.HasPrefix(line, "https://") || strings.HasPrefix(line, "http://")) && !strings.ContainsAny(line, " \t") {
+			return line
+		}
+		return ""
+	}
+	return ""
+}
+
+// kartoonsFetch performs a GET with a timeout and returns the body (capped at 8 MB).
 func kartoonsFetch(parent context.Context, rawURL string, headers map[string]string, timeout time.Duration) ([]byte, int, error) {
+	return kartoonsFetchLimit(parent, rawURL, headers, timeout, 8<<20)
+}
+
+// kartoonsFetchLimit is kartoonsFetch with an explicit body size cap in bytes.
+func kartoonsFetchLimit(parent context.Context, rawURL string, headers map[string]string, timeout time.Duration, limit int64) ([]byte, int, error) {
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
@@ -237,6 +303,6 @@ func kartoonsFetch(parent context.Context, rawURL string, headers map[string]str
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit))
 	return body, resp.StatusCode, err
 }
