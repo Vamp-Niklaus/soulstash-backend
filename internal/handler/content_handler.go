@@ -917,12 +917,30 @@ var anticipatedUpcomingMovieIDs = []int{
 	1147572, // Narnia: The Magician's Nephew
 	216527,  // Avatar 4
 	1523140, // Man of Tomorrow
-	1300968, // The Hunger Games: Sunrise on the Reaping
-	1401586, // Sonic the Hedgehog 4
-	1260649, // Jumanji: Open World
-	1300926, // The Angry Birds Movie 3
-	1047807, // Heat 2
 	1273002, // 28 Years Later: Part III
+	393209,  // Avatar 5
+	1047807, // Heat 2
+	1260649, // Jumanji: Open World
+	1198577, // They Follow
+	1540936, // Anything but Ghosts
+	1297467, // The Exorcist: Martyrs
+	1417668, // Star Wars: Starfighter
+	1327821, // Incredibles 3
+	1485839, // Elden Ring
+	1177369, // The Legend of Zelda
+	1320786, // Terrifier 4
+	1024604, // Frozen III
+	1401586, // Sonic the Hedgehog 4
+	755679,  // Fast Forever
+	1090869, // The Lord of the Rings: The Hunt for Gollum
+	701244,  // The Take
+	1497464, // Gatto
+	1077873, // The Princess Diaries 3
+	1293690, // Untitled X-Men Film
+	1384758, // Ice Age: Boiling Point
+	1280608, // Evil Dead Wrath
+	1300968, // The Hunger Games: Sunrise on the Reaping
+	1300926, // The Angry Birds Movie 3
 }
 
 var (
@@ -991,6 +1009,31 @@ func (h *ContentHandler) getAnticipatedUpcoming(ctx context.Context) []map[strin
 	return valid
 }
 
+func discoverUpcomingItems(data map[string]any, adminMode int) []map[string]any {
+	results, _ := data["results"].([]any)
+	items := make([]map[string]any, 0, len(results))
+	for _, raw := range results {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		posterPath, _ := item["poster_path"].(string)
+		if strings.TrimSpace(posterPath) == "" {
+			continue
+		}
+		adult := item["adult"] == true
+		if adminMode == 0 && adult {
+			continue
+		}
+		if adminMode == 2 && !adult {
+			continue
+		}
+		item["media_type"] = "Movie"
+		items = append(items, item)
+	}
+	return items
+}
+
 // GetUpcoming returns movies that have not been released yet, sorted by popularity (most anticipated).
 // Page 1 features the most anticipated blockbuster films (matching the Letterboxd anticipated list),
 // followed by TMDB discover upcoming films. Subsequent pages provide infinite scroll from TMDB discover.
@@ -999,59 +1042,72 @@ func (h *ContentHandler) GetUpcoming(w http.ResponseWriter, r *http.Request) {
 	adminMode := h.searchAdminMode(r)
 	today := time.Now().UTC().Format("2006-01-02")
 
-	params := map[string]string{
-		"language":                 "en-US",
-		"page":                     strconv.Itoa(page),
-		"include_adult":            strconv.FormatBool(adminMode == 2),
-		"sort_by":                  "popularity.desc",
-		"primary_release_date.gte": today,
-	}
-	data, err := h.tmdbClient.Get(r.Context(), "/3/discover/movie", params)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "Failed to fetch upcoming movies")
-		return
-	}
-
-	if adminMode == 2 {
-		results, _ := data["results"].([]any)
-		for _, raw := range results {
-			if item, ok := raw.(map[string]any); ok {
-				item["adult"] = true
-				item["_isAdultDiscover"] = true
-			}
-		}
-	}
-
-	discover := discoverItems(data, "Movie", adminMode, h.adultEngine, false)
 	anticipated := h.getAnticipatedUpcoming(r.Context())
-
-	anticipatedSet := make(map[any]bool, len(anticipated))
+	anticipatedSet := make(map[string]bool, len(anticipated))
 	for _, a := range anticipated {
 		if id := a["id"]; id != nil {
-			anticipatedSet[id] = true
+			anticipatedSet[fmt.Sprint(id)] = true
 		}
 	}
 
-	var items []map[string]any
+	targetCount := 20
 	if page == 1 {
-		items = make([]map[string]any, 0, len(anticipated)+len(discover))
-		items = append(items, anticipated...)
-		for _, d := range discover {
-			if id := d["id"]; id != nil && !anticipatedSet[id] {
-				items = append(items, d)
-			}
-		}
-	} else {
-		items = make([]map[string]any, 0, len(discover))
-		for _, d := range discover {
-			if id := d["id"]; id != nil && !anticipatedSet[id] {
-				items = append(items, d)
+		targetCount = len(anticipated) + 15
+	}
+
+	items := make([]map[string]any, 0, targetCount)
+	seen := make(map[string]bool)
+
+	if page == 1 {
+		for _, a := range anticipated {
+			idStr := fmt.Sprint(a["id"])
+			if !seen[idStr] {
+				seen[idStr] = true
+				items = append(items, a)
 			}
 		}
 	}
 
-	totalPages := max(int(getFloat(data["total_pages"])), 1)
-	totalResults := int(getFloat(data["total_results"]))
+	currentTmdbPage := page
+	totalPages, totalResults := 1, 0
+
+	for attempts := 0; len(items) < targetCount && attempts < 4; attempts++ {
+		params := map[string]string{
+			"language":                 "en-US",
+			"page":                     strconv.Itoa(currentTmdbPage),
+			"include_adult":            strconv.FormatBool(adminMode == 2),
+			"sort_by":                  "popularity.desc",
+			"primary_release_date.gte": today,
+		}
+		data, err := h.tmdbClient.Get(r.Context(), "/3/discover/movie", params)
+		if err != nil {
+			break
+		}
+
+		totalPages = max(totalPages, int(getFloat(data["total_pages"])))
+		totalResults = max(totalResults, int(getFloat(data["total_results"])))
+
+		discover := discoverUpcomingItems(data, adminMode)
+		for _, d := range discover {
+			idStr := fmt.Sprint(d["id"])
+			if page > 1 && anticipatedSet[idStr] {
+				continue
+			}
+			if !seen[idStr] {
+				seen[idStr] = true
+				items = append(items, d)
+				if len(items) >= targetCount {
+					break
+				}
+			}
+		}
+		currentTmdbPage++
+	}
+
+	if totalPages < 1 {
+		totalPages = 500
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"movies":        items,
 		"results":       items,
