@@ -100,6 +100,7 @@ func (h *ContentHandler) RegisterRoutes(r chi.Router) {
 		// Feeds
 		cr.Get("/trending", h.GetTrending)
 		cr.Get("/popular", h.GetPopular)
+		cr.Get("/upcoming", h.GetUpcoming)
 		cr.Get("/genres", h.GetGenres)
 		cr.Get("/home", h.GetHome)
 
@@ -112,6 +113,7 @@ func (h *ContentHandler) RegisterRoutes(r chi.Router) {
 		// Search
 		cr.Get("/search", h.Search)
 		cr.Get("/search/users", h.SearchUsers)
+		cr.Get("/search/collections", h.SearchTMDBCollections)
 
 		// Player sources & embed
 		cr.Get("/player/sources", h.GetPlayerSources)
@@ -898,6 +900,66 @@ func (h *ContentHandler) GetPopular(w http.ResponseWriter, r *http.Request) {
 		"total_results": totalResults,
 		"pagination": map[string]int{
 			"page": page, "limit": limit, "total": totalResults, "pages": safeTotalPages,
+		},
+	})
+}
+
+// GetUpcoming returns movies that have not been released yet, nearest release date first.
+// It reads one TMDB discover page per request so the `page` query parameter stays predictable
+// for infinite scroll. Titles without a poster are dropped, like the other feeds.
+func (h *ContentHandler) GetUpcoming(w http.ResponseWriter, r *http.Request) {
+	page := parsePositiveInt(r.URL.Query().Get("page"), 1)
+	adminMode := h.searchAdminMode(r)
+	now := time.Now().UTC()
+	from := now.AddDate(0, 0, 1).Format("2006-01-02") // strictly after today
+	to := now.AddDate(1, 0, 0).Format("2006-01-02")   // "soon" = within the next year
+
+	params := map[string]string{
+		"language":                 "en-US",
+		"page":                     strconv.Itoa(page),
+		"include_adult":            strconv.FormatBool(adminMode == 2),
+		"sort_by":                  "primary_release_date.asc",
+		"primary_release_date.gte": from,
+		"primary_release_date.lte": to,
+		"with_release_type":        "2|3", // limited or wide theatrical releases only
+	}
+	data, err := h.tmdbClient.Get(r.Context(), "/3/discover/movie", params)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "Failed to fetch upcoming movies")
+		return
+	}
+
+	if adminMode == 2 {
+		results, _ := data["results"].([]any)
+		for _, raw := range results {
+			if item, ok := raw.(map[string]any); ok {
+				item["adult"] = true
+				item["_isAdultDiscover"] = true
+			}
+		}
+	}
+
+	items := discoverItems(data, "Movie", adminMode, h.adultEngine, false)
+	// Nearest release date first; within the same day the more popular title leads.
+	sort.SliceStable(items, func(i, j int) bool {
+		di, _ := items[i]["release_date"].(string)
+		dj, _ := items[j]["release_date"].(string)
+		if di != dj {
+			return di < dj
+		}
+		return getFloat(items[i]["popularity"]) > getFloat(items[j]["popularity"])
+	})
+
+	totalPages := max(int(getFloat(data["total_pages"])), 1)
+	totalResults := int(getFloat(data["total_results"]))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"movies":        items,
+		"results":       items,
+		"page":          page,
+		"total_pages":   totalPages,
+		"total_results": totalResults,
+		"pagination": map[string]int{
+			"page": page, "limit": len(items), "total": totalResults, "pages": totalPages,
 		},
 	})
 }
