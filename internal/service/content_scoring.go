@@ -182,6 +182,7 @@ func NormalizeMediaItem(item map[string]any, mediaType string) map[string]any {
 		"release_year":     releaseYear,
 		"originalLanguage": item["original_language"],
 		"originCountry":    item["origin_country"],
+		"genre_ids":        item["genre_ids"],
 		"voteCount":        item["vote_count"],
 		"voteAverage":      item["vote_average"],
 		"popularity":       item["popularity"],
