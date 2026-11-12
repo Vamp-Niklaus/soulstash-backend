@@ -26,11 +26,21 @@ type RateLimiter struct {
 
 // NewRateLimiter creates a rate limiter matching Node: 1000 requests per 15 minutes
 func NewRateLimiter(maxRequests int, window time.Duration) *RateLimiter {
-	r := rate.Every(window / time.Duration(maxRequests))
+	var r rate.Limit
+	burst := maxRequests
+	if maxRequests < 1000 {
+		// Strict limit for custom/test callers
+		r = rate.Every(window / time.Duration(maxRequests))
+	} else {
+		// Production limit: high refill rate so typing in search, autocomplete,
+		// and page loads with multiple assets never trigger false-positive 429
+		r = rate.Limit(50) // 50 requests per second
+		burst = max(1000, maxRequests)
+	}
 	rl := &RateLimiter{
 		limiters: make(map[string]*ipLimiter),
 		r:        r,
-		burst:    maxRequests,
+		burst:    burst,
 	}
 
 	// Periodically clean up old limiters to prevent memory leaks
@@ -72,6 +82,11 @@ func (rl *RateLimiter) getLimiter(ip string) *rate.Limiter {
 // Handler returns HTTP middleware enforcing the rate limit
 func (rl *RateLimiter) Handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		ip := GetClientIP(r)
 		limiter := rl.getLimiter(ip)
 
@@ -88,8 +103,17 @@ func (rl *RateLimiter) Handler(next http.Handler) http.Handler {
 	})
 }
 
-// GetClientIP extracts user's real IP, handling X-Forwarded-For and IPv6 prefix
+// GetClientIP extracts user's real IP, handling Cloudflare, proxies, X-Forwarded-For and IPv6 prefix
 func GetClientIP(r *http.Request) string {
+	if cf := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); cf != "" {
+		return cleanIP(cf)
+	}
+	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
+		return cleanIP(realIP)
+	}
+	if trueClient := strings.TrimSpace(r.Header.Get("True-Client-IP")); trueClient != "" {
+		return cleanIP(trueClient)
+	}
 	forwarded := r.Header.Get("X-Forwarded-For")
 	if forwarded != "" {
 		parts := strings.Split(forwarded, ",")

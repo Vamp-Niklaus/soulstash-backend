@@ -104,7 +104,7 @@ func (s *Server) setupRoutes(deps *HandlerDeps) {
 	s.router.Get("/cron-health", s.handleCronHealth)
 	s.router.Get("/keep-alive", s.handleCronHealth)
 
-	rateLimiter := middleware.NewRateLimiter(1000, 15*time.Minute)
+	rateLimiter := middleware.NewRateLimiter(15000, 15*time.Minute)
 
 	// Base API route group with rate limiter
 	s.router.Route("/api", func(r chi.Router) {

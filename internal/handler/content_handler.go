@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -904,9 +905,95 @@ func (h *ContentHandler) GetPopular(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+var anticipatedUpcomingMovieIDs = []int{
+	1170608, // Dune: Part Three
+	911916,  // Spider-Man: Beyond the Spider-Verse
+	1003596, // Avengers: Doomsday
+	806704,  // The Batman: Part II
+	1421903, // Werwulf
+	1003598, // Avengers: Secret Wars
+	1457866, // THE FURTHER MIS-ADVENTURES OF CLIFF BOOTH
+	421892,  // Shrek 5
+	1147572, // Narnia: The Magician's Nephew
+	216527,  // Avatar 4
+	1523140, // Man of Tomorrow
+	1300968, // The Hunger Games: Sunrise on the Reaping
+	1401586, // Sonic the Hedgehog 4
+	1260649, // Jumanji: Open World
+	1300926, // The Angry Birds Movie 3
+	1047807, // Heat 2
+	1273002, // 28 Years Later: Part III
+}
+
+var (
+	anticipatedUpcomingMu    sync.RWMutex
+	anticipatedUpcomingCache []map[string]any
+	anticipatedUpcomingTime  time.Time
+)
+
+func (h *ContentHandler) getAnticipatedUpcoming(ctx context.Context) []map[string]any {
+	anticipatedUpcomingMu.RLock()
+	if len(anticipatedUpcomingCache) > 0 && time.Since(anticipatedUpcomingTime) < 6*time.Hour {
+		cached := anticipatedUpcomingCache
+		anticipatedUpcomingMu.RUnlock()
+		return cached
+	}
+	anticipatedUpcomingMu.RUnlock()
+
+	anticipatedUpcomingMu.Lock()
+	defer anticipatedUpcomingMu.Unlock()
+
+	if len(anticipatedUpcomingCache) > 0 && time.Since(anticipatedUpcomingTime) < 6*time.Hour {
+		return anticipatedUpcomingCache
+	}
+
+	items := make([]map[string]any, len(anticipatedUpcomingMovieIDs))
+	var wg sync.WaitGroup
+	for i, id := range anticipatedUpcomingMovieIDs {
+		wg.Add(1)
+		go func(idx int, movieID int) {
+			defer wg.Done()
+			detail, err := h.tmdbClient.Get(ctx, fmt.Sprintf("/3/movie/%d", movieID), map[string]string{"language": "en-US"})
+			if err == nil && detail != nil {
+				poster, _ := detail["poster_path"].(string)
+				if poster == "" {
+					return
+				}
+				releaseDate, _ := detail["release_date"].(string)
+				title, _ := detail["title"].(string)
+				items[idx] = map[string]any{
+					"id":            detail["id"],
+					"title":         title,
+					"name":          title,
+					"release_date":  releaseDate,
+					"poster_path":   poster,
+					"backdrop_path": detail["backdrop_path"],
+					"overview":      detail["overview"],
+					"popularity":    detail["popularity"],
+					"vote_average":  detail["vote_average"],
+					"vote_count":    detail["vote_count"],
+					"media_type":    "Movie",
+				}
+			}
+		}(i, id)
+	}
+	wg.Wait()
+
+	valid := make([]map[string]any, 0, len(items))
+	for _, it := range items {
+		if it != nil {
+			valid = append(valid, it)
+		}
+	}
+
+	anticipatedUpcomingCache = valid
+	anticipatedUpcomingTime = time.Now()
+	return valid
+}
+
 // GetUpcoming returns movies that have not been released yet, sorted by popularity (most anticipated).
-// It reads one TMDB discover page per request so the `page` query parameter stays predictable
-// for infinite scroll. Titles without a poster are dropped, like the other feeds.
+// Page 1 features the most anticipated blockbuster films (matching the Letterboxd anticipated list),
+// followed by TMDB discover upcoming films. Subsequent pages provide infinite scroll from TMDB discover.
 func (h *ContentHandler) GetUpcoming(w http.ResponseWriter, r *http.Request) {
 	page := parsePositiveInt(r.URL.Query().Get("page"), 1)
 	adminMode := h.searchAdminMode(r)
@@ -935,7 +1022,33 @@ func (h *ContentHandler) GetUpcoming(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	items := discoverItems(data, "Movie", adminMode, h.adultEngine, false)
+	discover := discoverItems(data, "Movie", adminMode, h.adultEngine, false)
+	anticipated := h.getAnticipatedUpcoming(r.Context())
+
+	anticipatedSet := make(map[any]bool, len(anticipated))
+	for _, a := range anticipated {
+		if id := a["id"]; id != nil {
+			anticipatedSet[id] = true
+		}
+	}
+
+	var items []map[string]any
+	if page == 1 {
+		items = make([]map[string]any, 0, len(anticipated)+len(discover))
+		items = append(items, anticipated...)
+		for _, d := range discover {
+			if id := d["id"]; id != nil && !anticipatedSet[id] {
+				items = append(items, d)
+			}
+		}
+	} else {
+		items = make([]map[string]any, 0, len(discover))
+		for _, d := range discover {
+			if id := d["id"]; id != nil && !anticipatedSet[id] {
+				items = append(items, d)
+			}
+		}
+	}
 
 	totalPages := max(int(getFloat(data["total_pages"])), 1)
 	totalResults := int(getFloat(data["total_results"]))

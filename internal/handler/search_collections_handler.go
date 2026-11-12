@@ -7,6 +7,10 @@ import (
 	"sync"
 )
 
+var (
+	tmdbCollectionItemCountCache sync.Map // map[int]int
+)
+
 // SearchTMDBCollections searches TMDB movie collections (franchises) by name.
 // The navbar "Collections" tab merges these with user-published collections and
 // labels their publisher as "TMDB", along with the item_count of movies in the franchise.
@@ -29,12 +33,15 @@ func (h *ContentHandler) SearchTMDBCollections(w http.ResponseWriter, r *http.Re
 	}
 
 	raw, _ := data["results"].([]any)
-	if len(raw) > 15 {
-		raw = raw[:15]
+	if len(raw) > 12 {
+		raw = raw[:12]
 	}
 
 	results := make([]map[string]any, len(raw))
 	var wg sync.WaitGroup
+	lookupLimit := 6
+	lookupCount := 0
+
 	for i, entry := range raw {
 		item, ok := entry.(map[string]any)
 		if !ok || getFloat(item["id"]) == 0 {
@@ -49,16 +56,26 @@ func (h *ContentHandler) SearchTMDBCollections(w http.ResponseWriter, r *http.Re
 			"backdrop_path": item["backdrop_path"],
 			"item_count":    0,
 		}
-		wg.Add(1)
-		go func(idx int, colID int) {
-			defer wg.Done()
-			detail, err := h.tmdbClient.Get(r.Context(), fmt.Sprintf("/3/collection/%d", colID), map[string]string{"language": "en-US"})
-			if err == nil && detail != nil {
-				if parts, ok := detail["parts"].([]any); ok {
-					results[idx]["item_count"] = len(parts)
+
+		if cachedCount, ok := tmdbCollectionItemCountCache.Load(id); ok {
+			results[i]["item_count"] = cachedCount.(int)
+			continue
+		}
+
+		if lookupCount < lookupLimit {
+			lookupCount++
+			wg.Add(1)
+			go func(idx int, colID int) {
+				defer wg.Done()
+				detail, err := h.tmdbClient.Get(r.Context(), fmt.Sprintf("/3/collection/%d", colID), map[string]string{"language": "en-US"})
+				if err == nil && detail != nil {
+					if parts, ok := detail["parts"].([]any); ok {
+						results[idx]["item_count"] = len(parts)
+						tmdbCollectionItemCountCache.Store(colID, len(parts))
+					}
 				}
-			}
-		}(i, id)
+			}(i, id)
+		}
 	}
 	wg.Wait()
 
