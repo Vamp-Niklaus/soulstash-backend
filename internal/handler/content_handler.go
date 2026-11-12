@@ -904,24 +904,20 @@ func (h *ContentHandler) GetPopular(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GetUpcoming returns movies that have not been released yet, nearest release date first.
+// GetUpcoming returns movies that have not been released yet, sorted by popularity (most anticipated).
 // It reads one TMDB discover page per request so the `page` query parameter stays predictable
 // for infinite scroll. Titles without a poster are dropped, like the other feeds.
 func (h *ContentHandler) GetUpcoming(w http.ResponseWriter, r *http.Request) {
 	page := parsePositiveInt(r.URL.Query().Get("page"), 1)
 	adminMode := h.searchAdminMode(r)
-	now := time.Now().UTC()
-	from := now.AddDate(0, 0, 1).Format("2006-01-02") // strictly after today
-	to := now.AddDate(1, 0, 0).Format("2006-01-02")   // "soon" = within the next year
+	today := time.Now().UTC().Format("2006-01-02")
 
 	params := map[string]string{
 		"language":                 "en-US",
 		"page":                     strconv.Itoa(page),
 		"include_adult":            strconv.FormatBool(adminMode == 2),
-		"sort_by":                  "primary_release_date.asc",
-		"primary_release_date.gte": from,
-		"primary_release_date.lte": to,
-		"with_release_type":        "2|3", // limited or wide theatrical releases only
+		"sort_by":                  "popularity.desc",
+		"primary_release_date.gte": today,
 	}
 	data, err := h.tmdbClient.Get(r.Context(), "/3/discover/movie", params)
 	if err != nil {
@@ -940,15 +936,6 @@ func (h *ContentHandler) GetUpcoming(w http.ResponseWriter, r *http.Request) {
 	}
 
 	items := discoverItems(data, "Movie", adminMode, h.adultEngine, false)
-	// Nearest release date first; within the same day the more popular title leads.
-	sort.SliceStable(items, func(i, j int) bool {
-		di, _ := items[i]["release_date"].(string)
-		dj, _ := items[j]["release_date"].(string)
-		if di != dj {
-			return di < dj
-		}
-		return getFloat(items[i]["popularity"]) > getFloat(items[j]["popularity"])
-	})
 
 	totalPages := max(int(getFloat(data["total_pages"])), 1)
 	totalResults := int(getFloat(data["total_results"]))

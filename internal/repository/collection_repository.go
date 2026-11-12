@@ -228,6 +228,7 @@ func (r *mongoCollectionRepo) GetPublishedCollections(ctx context.Context) ([]ma
 		bson.D{{Key: "$project", Value: bson.M{
 			"username":   1,
 			"avatar":     1,
+			"admin":      1,
 			"collection": "$collections",
 		}}},
 	}
