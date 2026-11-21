@@ -110,11 +110,25 @@ func (h *ContentHandler) EnsureLetterboxdSeeded(ctx context.Context) {
 	}
 	letterboxdSeededOnce.Do(func() {
 		coll := h.db.Collection(mongodb.CollectionLetterboxd)
-		// Clean up any old repetitive spotlights if any were generated into MongoDB!
+		// Clean up any old dynamic or repetitive spotlights/themes generated into MongoDB!
+		// Keep ONLY verified seed slugs in MongoDB.
+		seedSlugs := []string{
+			"letterboxd-top-250",
+			"letterboxd-popular",
+			"best-of-a24-ranked",
+			"studio-ghibli-complete",
+			"sight-and-sound-greatest",
+			"1001-movies-before-you-die",
+			"top-scifi-masterpieces",
+			"top-horror-masterpieces",
+			"fan-favorites-2024-2025",
+		}
 		_, _ = coll.DeleteMany(ctx, bson.M{
 			"$or": []bson.M{
+				{"slug": bson.M{"$nin": seedSlugs}},
 				{"slug": bson.M{"$regex": "^letterboxd-spotlight-"}},
-				{"name": bson.M{"$regex": "^Letterboxd Spotlight:"}},
+				{"name": bson.M{"$regex": "(?i)spotlight"}},
+				{"name": bson.M{"$regex": "(?i)curated"}},
 			},
 		})
 
@@ -204,8 +218,19 @@ func (h *ContentHandler) GetLetterboxdCollections(w http.ResponseWriter, r *http
 		h.EnsureLetterboxdSeeded(ctx)
 		coll := h.db.Collection(mongodb.CollectionLetterboxd)
 
+		seedSlugs := []string{
+			"letterboxd-top-250",
+			"letterboxd-popular",
+			"best-of-a24-ranked",
+			"studio-ghibli-complete",
+			"sight-and-sound-greatest",
+			"1001-movies-before-you-die",
+			"top-scifi-masterpieces",
+			"top-horror-masterpieces",
+			"fan-favorites-2024-2025",
+		}
 		filter := bson.M{
-			"slug": bson.M{"$not": bson.M{"$regex": "^letterboxd-spotlight-"}},
+			"slug": bson.M{"$in": seedSlugs},
 		}
 		if q != "" {
 			filter["$or"] = []bson.M{
@@ -216,7 +241,7 @@ func (h *ContentHandler) GetLetterboxdCollections(w http.ResponseWriter, r *http
 		}
 
 		offset := (page - 1) * limit
-		opts := options.Find().SetSort(bson.M{"updatedAt": -1}).SetSkip(int64(offset)).SetLimit(int64(limit))
+		opts := options.Find().SetSort(bson.M{"createdAt": 1}).SetSkip(int64(offset)).SetLimit(int64(limit))
 		cursor, err := coll.Find(ctx, filter, opts)
 		if err == nil {
 			var docs []bson.M
@@ -272,31 +297,6 @@ func (h *ContentHandler) GetLetterboxdCollections(w http.ResponseWriter, r *http
 						"movies":      movies,
 					},
 				})
-			}
-
-			// If we need more collections for infinite scrolling, dynamically resolve curated themes!
-			if len(results) < limit && q == "" {
-				for idx := offset; idx < offset+limit && len(results) < limit; idx++ {
-					if idx < len(letterboxdCuratedThemes) {
-						theme := letterboxdCuratedThemes[idx]
-						// Check if already in DB
-						if existing := h.findLetterboxdDocInDB(ctx, theme.Slug); existing != nil {
-							results = append(results, existing)
-							continue
-						}
-						// Dynamically resolve theme from TMDB
-						if resolved, rErr := h.ResolveDynamicLetterboxdCollection(ctx, theme.Query); rErr == nil && resolved != nil {
-							if cMap, ok := resolved["collection"].(map[string]any); ok {
-								cMap["name"] = theme.Name
-								cMap["slug"] = theme.Slug
-								cMap["description"] = theme.Description
-								resolved["slug"] = theme.Slug
-								h.saveLetterboxdDocToDB(ctx, resolved)
-							}
-							results = append(results, resolved)
-						}
-					}
-				}
 			}
 
 			if len(results) > 0 || pageStr != "" {
@@ -518,12 +518,6 @@ func (h *ContentHandler) FindOrResolveLetterboxdCollection(ctx context.Context, 
 				return entry
 			}
 		}
-	}
-
-	// 3. Cache Miss: Dynamically resolve from TMDB / Letterboxd topic, store into MongoDB, and serve!
-	resolved, err := h.ResolveDynamicLetterboxdCollection(ctx, target)
-	if err == nil && resolved != nil {
-		return resolved
 	}
 
 	return nil
@@ -887,18 +881,6 @@ func FindLetterboxdCollection(identifier string) map[string]any {
 			if strings.EqualFold(colName, target) || strings.EqualFold(slugify(colName), targetSlug) {
 				return entry
 			}
-		}
-	}
-
-	// 3. Fallback: dynamically resolve on cache miss if content handler is set
-	globalLetterboxdLock.RLock()
-	h := globalLetterboxdContentHandler
-	globalLetterboxdLock.RUnlock()
-	if h != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-		defer cancel()
-		if resolved, err := h.ResolveDynamicLetterboxdCollection(ctx, target); err == nil && resolved != nil {
-			return resolved
 		}
 	}
 

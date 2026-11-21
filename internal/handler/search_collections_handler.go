@@ -394,34 +394,6 @@ func (h *ContentHandler) SearchTMDBCollections(w http.ResponseWriter, r *http.Re
 		}
 	}
 
-	// 4. If neither TMDB nor MongoDB matched anything and query length >= 3,
-	// dynamically resolve from TMDB / Letterboxd topic, cache in MongoDB, and include in search results!
-	if len(letterboxdMatches) == 0 && len(tmdbResults) == 0 && len([]rune(query)) >= 3 {
-		dynamicCol, err := h.ResolveDynamicLetterboxdCollection(ctx, query)
-		if err == nil && dynamicCol != nil {
-			cMap, _ := dynamicCol["collection"].(map[string]any)
-			slug, _ := dynamicCol["slug"].(string)
-			name, _ := cMap["name"].(string)
-			desc, _ := cMap["description"].(string)
-			banner, _ := cMap["banner"].(string)
-			mCount := int(getFloat(cMap["movieCount"]))
-			letterboxdMatches = append(letterboxdMatches, map[string]any{
-				"id":            "letterboxd-" + slug,
-				"slug":          slug,
-				"name":          name,
-				"title":         name,
-				"overview":      desc,
-				"description":   desc,
-				"poster_path":   banner,
-				"backdrop_path": banner,
-				"item_count":    mCount,
-				"source":        "letterboxd",
-				"publisher":     "Letterboxd",
-				"media_type":    "Collection",
-			})
-		}
-	}
-
 	// Merge Letterboxd results and TMDB results
 	allResults := append(letterboxdMatches, tmdbResults...)
 	writeJSON(w, http.StatusOK, map[string]any{"query": query, "results": allResults})
