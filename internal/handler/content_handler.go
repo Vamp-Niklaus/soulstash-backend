@@ -92,6 +92,13 @@ func (h *ContentHandler) RegisterRoutes(r chi.Router) {
 		cr.Get("/series/{id}/credits", h.GetSeriesCredits)
 		cr.Get("/series/{id}", h.GetSeriesDetail)
 		cr.Get("/series/{id}/season/{seasonNumber}", h.GetSeriesSeason)
+		// Trailers / videos (TMDB)
+		cr.Get("/movies/{id}/videos", h.GetMovieVideos)
+		cr.Get("/movie/{id}/videos", h.GetMovieVideos)
+		cr.Get("/series/{id}/videos", h.GetSeriesVideos)
+		cr.Get("/tv/{id}/videos", h.GetSeriesVideos)
+		cr.Get("/series/{id}/season/{seasonNumber}/videos", h.GetSeasonVideos)
+		cr.Get("/series/{id}/season/{seasonNumber}/episode/{episodeNumber}/videos", h.GetEpisodeVideos)
 
 		// Person Details & Credits (both singular & plural aliases)
 		cr.Get("/person/{id}", h.GetPersonDetail)
@@ -116,6 +123,7 @@ func (h *ContentHandler) RegisterRoutes(r chi.Router) {
 		cr.Get("/search", h.Search)
 		cr.Get("/search/users", h.SearchUsers)
 		cr.Get("/search/collections", h.SearchTMDBCollections)
+		cr.Get("/tmdb-collections/featured", h.GetFeaturedTMDBCollections)
 
 		// Player sources & embed
 		cr.Get("/player/sources", h.GetPlayerSources)
