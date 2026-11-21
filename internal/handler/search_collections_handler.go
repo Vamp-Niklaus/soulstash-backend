@@ -264,6 +264,7 @@ func (h *ContentHandler) SearchTMDBCollections(w http.ResponseWriter, r *http.Re
 		h.EnsureLetterboxdSeeded(ctx)
 		coll := h.db.Collection(mongodb.CollectionLetterboxd)
 		filter := bson.M{
+			"slug": bson.M{"$not": bson.M{"$regex": "^letterboxd-spotlight-"}},
 			"$or": []bson.M{
 				{"name": bson.M{"$regex": regexp.QuoteMeta(query), "$options": "i"}},
 				{"description": bson.M{"$regex": regexp.QuoteMeta(query), "$options": "i"}},

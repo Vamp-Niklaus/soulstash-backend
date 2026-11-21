@@ -16,6 +16,7 @@ import (
 	"soulstash/internal/service"
 
 	"github.com/go-chi/chi/v5"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 type CollectionHandler struct {
@@ -621,7 +622,41 @@ func (h *CollectionHandler) GetPublicCollection(w http.ResponseWriter, r *http.R
 					for _, m := range mList {
 						movies = append(movies, m)
 					}
+				} else if mListBson, ok := cMap["movies"].(bson.A); ok {
+					for _, m := range mListBson {
+						movies = append(movies, m)
+					}
 				}
+			}
+			// If movies is still empty, fall back directly to in-memory seeds!
+			if len(movies) == 0 {
+				for _, seed := range loadLetterboxdCollections() {
+					sCol, _ := seed["collection"].(map[string]any)
+					if sCol == nil {
+						sCol = seed
+					}
+					sSlug, _ := seed["slug"].(string)
+					if sSlug == "" {
+						sSlug, _ = sCol["slug"].(string)
+					}
+					sName, _ := sCol["name"].(string)
+					if strings.EqualFold(sSlug, collectionName) || strings.EqualFold(sSlug, slugify(collectionName)) ||
+						strings.EqualFold(sName, collectionName) || strings.EqualFold(slugify(sName), slugify(collectionName)) {
+						if seedMovies, ok := sCol["movies"].([]any); ok && len(seedMovies) > 0 {
+							movies = seedMovies
+							if cMap["description"] == nil || cMap["description"] == "" {
+								cMap["description"] = sCol["description"]
+							}
+							if cMap["banner"] == nil || cMap["banner"] == "" {
+								cMap["banner"] = sCol["banner"]
+							}
+							break
+						}
+					}
+				}
+			}
+			if movies == nil {
+				movies = []any{}
 			}
 			name, _ := cMap["name"].(string)
 			if name == "" {

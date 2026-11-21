@@ -103,24 +103,26 @@ func loadLetterboxdCollections() []map[string]any {
 }
 
 // EnsureLetterboxdSeeded checks if MongoDB has Letterboxd collections.
-// If 0 documents are found, it seeds the initial verified collections into MongoDB.
+// Seeds verified collections and purges any legacy generated spotlights.
 func (h *ContentHandler) EnsureLetterboxdSeeded(ctx context.Context) {
 	if h.db == nil {
 		return
 	}
 	letterboxdSeededOnce.Do(func() {
 		coll := h.db.Collection(mongodb.CollectionLetterboxd)
-		count, err := coll.CountDocuments(ctx, bson.M{})
-		if err != nil || count > 0 {
-			return
-		}
+		// Clean up any old repetitive spotlights if any were generated into MongoDB!
+		_, _ = coll.DeleteMany(ctx, bson.M{
+			"$or": []bson.M{
+				{"slug": bson.M{"$regex": "^letterboxd-spotlight-"}},
+				{"name": bson.M{"$regex": "^Letterboxd Spotlight:"}},
+			},
+		})
 
 		seeds := loadLetterboxdCollections()
 		if len(seeds) == 0 {
 			return
 		}
 
-		docs := make([]any, 0, len(seeds))
 		now := time.Now()
 		for _, seed := range seeds {
 			slug, _ := seed["slug"].(string)
@@ -135,25 +137,47 @@ func (h *ContentHandler) EnsureLetterboxdSeeded(ctx context.Context) {
 			if slug == "" {
 				slug = slugify(name)
 			}
-
-			doc := bson.M{
-				"_id":         slug,
-				"slug":        slug,
-				"name":        name,
-				"description": desc,
-				"banner":      banner,
-				"movieCount":  len(movies),
-				"movies":      movies,
-				"source":      "letterboxd",
-				"username":    "letterboxd",
-				"createdAt":   now,
-				"updatedAt":   now,
+			if len(movies) == 0 {
+				continue
 			}
-			docs = append(docs, doc)
-		}
 
-		if len(docs) > 0 {
-			_, _ = coll.InsertMany(ctx, docs)
+			filter := bson.M{"$or": []bson.M{{"_id": slug}, {"slug": slug}}}
+			var existing bson.M
+			if err := coll.FindOne(ctx, filter).Decode(&existing); err != nil {
+				doc := bson.M{
+					"_id":         slug,
+					"slug":        slug,
+					"name":        name,
+					"description": desc,
+					"banner":      banner,
+					"movieCount":  len(movies),
+					"movies":      movies,
+					"source":      "letterboxd",
+					"username":    "letterboxd",
+					"createdAt":   now,
+					"updatedAt":   now,
+				}
+				_, _ = coll.InsertOne(ctx, doc)
+			} else {
+				// If existing document has null or 0 movies, repair it!
+				var existingCount int
+				if mList, ok := existing["movies"].(bson.A); ok {
+					existingCount = len(mList)
+				} else if mList2, ok2 := existing["movies"].([]any); ok2 {
+					existingCount = len(mList2)
+				}
+				if existingCount == 0 {
+					_, _ = coll.UpdateOne(ctx, filter, bson.M{
+						"$set": bson.M{
+							"movies":     movies,
+							"movieCount": len(movies),
+							"name":       name,
+							"banner":     banner,
+							"updatedAt":  now,
+						},
+					})
+				}
+			}
 		}
 	})
 }
@@ -180,14 +204,14 @@ func (h *ContentHandler) GetLetterboxdCollections(w http.ResponseWriter, r *http
 		h.EnsureLetterboxdSeeded(ctx)
 		coll := h.db.Collection(mongodb.CollectionLetterboxd)
 
-		filter := bson.M{}
+		filter := bson.M{
+			"slug": bson.M{"$not": bson.M{"$regex": "^letterboxd-spotlight-"}},
+		}
 		if q != "" {
-			filter = bson.M{
-				"$or": []bson.M{
-					{"name": bson.M{"$regex": regexp.QuoteMeta(q), "$options": "i"}},
-					{"description": bson.M{"$regex": regexp.QuoteMeta(q), "$options": "i"}},
-					{"slug": bson.M{"$regex": regexp.QuoteMeta(q), "$options": "i"}},
-				},
+			filter["$or"] = []bson.M{
+				{"name": bson.M{"$regex": regexp.QuoteMeta(q), "$options": "i"}},
+				{"description": bson.M{"$regex": regexp.QuoteMeta(q), "$options": "i"}},
+				{"slug": bson.M{"$regex": regexp.QuoteMeta(q), "$options": "i"}},
 			}
 		}
 
@@ -207,6 +231,33 @@ func (h *ContentHandler) GetLetterboxdCollections(w http.ResponseWriter, r *http
 				mCount := int(getFloat(doc["movieCount"]))
 				if mList, ok := movies.([]any); ok && mCount == 0 {
 					mCount = len(mList)
+				} else if mList2, ok2 := movies.(bson.A); ok2 && mCount == 0 {
+					mCount = len(mList2)
+				}
+				// If movies is empty or null, check if seed has it!
+				if mCount == 0 || movies == nil {
+					for _, seed := range loadLetterboxdCollections() {
+						sCol, _ := seed["collection"].(map[string]any)
+						if sCol == nil {
+							sCol = seed
+						}
+						sSlug, _ := seed["slug"].(string)
+						if sSlug == "" {
+							sSlug, _ = sCol["slug"].(string)
+						}
+						sName, _ := sCol["name"].(string)
+						if strings.EqualFold(sSlug, slug) || strings.EqualFold(slugify(sName), slug) {
+							if sMovies, ok := sCol["movies"].([]any); ok && len(sMovies) > 0 {
+								movies = sMovies
+								mCount = len(sMovies)
+								_, _ = coll.UpdateOne(ctx, bson.M{"_id": slug}, bson.M{"$set": bson.M{"movies": sMovies, "movieCount": len(sMovies)}})
+								break
+							}
+						}
+					}
+				}
+				if movies == nil {
+					movies = []any{}
 				}
 				results = append(results, map[string]any{
 					"username": "letterboxd",
@@ -240,26 +291,6 @@ func (h *ContentHandler) GetLetterboxdCollections(w http.ResponseWriter, r *http
 								cMap["slug"] = theme.Slug
 								cMap["description"] = theme.Description
 								resolved["slug"] = theme.Slug
-								h.saveLetterboxdDocToDB(ctx, resolved)
-							}
-							results = append(results, resolved)
-						}
-					} else {
-						// Beyond curated themes: generate infinite spotlight themes
-						genreQueries := []string{"Cinema Masters", "Cult Classics", "Neo-Noir", "Arthouse Gems", "Psychological Thrillers", "Sci-Fi Benchmarks", "High Adrenaline Action", "Horror Vanguard"}
-						gQuery := genreQueries[idx%len(genreQueries)]
-						slug := fmt.Sprintf("letterboxd-spotlight-%d", idx)
-						name := fmt.Sprintf("Letterboxd Spotlight: %s (Vol. %d)", gQuery, (idx/len(genreQueries))+1)
-						if existing := h.findLetterboxdDocInDB(ctx, slug); existing != nil {
-							results = append(results, existing)
-							continue
-						}
-						if resolved, rErr := h.ResolveDynamicLetterboxdCollection(ctx, gQuery); rErr == nil && resolved != nil {
-							if cMap, ok := resolved["collection"].(map[string]any); ok {
-								cMap["name"] = name
-								cMap["slug"] = slug
-								cMap["description"] = fmt.Sprintf("A curated Letterboxd showcase celebrating %s.", gQuery)
-								resolved["slug"] = slug
 								h.saveLetterboxdDocToDB(ctx, resolved)
 							}
 							results = append(results, resolved)
@@ -323,6 +354,33 @@ func (h *ContentHandler) findLetterboxdDocInDB(ctx context.Context, slug string)
 		mCount := int(getFloat(doc["movieCount"]))
 		if mList, ok := movies.([]any); ok && mCount == 0 {
 			mCount = len(mList)
+		} else if mList2, ok2 := movies.(bson.A); ok2 && mCount == 0 {
+			mCount = len(mList2)
+		}
+		// If movies is empty or null, check seeds to repair
+		if movies == nil || mCount == 0 {
+			for _, seed := range loadLetterboxdCollections() {
+				sCol, _ := seed["collection"].(map[string]any)
+				if sCol == nil {
+					sCol = seed
+				}
+				sSlug, _ := seed["slug"].(string)
+				if sSlug == "" {
+					sSlug, _ = sCol["slug"].(string)
+				}
+				sName, _ := sCol["name"].(string)
+				if strings.EqualFold(sSlug, slug) || strings.EqualFold(slugify(sName), slug) {
+					if sMovies, ok := sCol["movies"].([]any); ok && len(sMovies) > 0 {
+						movies = sMovies
+						mCount = len(sMovies)
+						_, _ = coll.UpdateOne(ctx, filter, bson.M{"$set": bson.M{"movies": sMovies, "movieCount": len(sMovies)}})
+						break
+					}
+				}
+			}
+		}
+		if movies == nil || mCount == 0 {
+			return nil
 		}
 		return map[string]any{
 			"username": "letterboxd",
@@ -396,19 +454,46 @@ func (h *ContentHandler) FindOrResolveLetterboxdCollection(ctx context.Context, 
 			mCount := int(getFloat(doc["movieCount"]))
 			if mList, ok := movies.([]any); ok && mCount == 0 {
 				mCount = len(mList)
+			} else if mList2, ok2 := movies.(bson.A); ok2 && mCount == 0 {
+				mCount = len(mList2)
 			}
-			return map[string]any{
-				"username": "letterboxd",
-				"source":   "letterboxd",
-				"slug":     slug,
-				"collection": map[string]any{
-					"name":        name,
-					"slug":        slug,
-					"description": desc,
-					"banner":      banner,
-					"movieCount":  mCount,
-					"movies":      movies,
-				},
+			// If movies is missing or empty, try seeds to repair!
+			if movies == nil || mCount == 0 {
+				for _, seed := range loadLetterboxdCollections() {
+					sCol, _ := seed["collection"].(map[string]any)
+					if sCol == nil {
+						sCol = seed
+					}
+					sSlug, _ := seed["slug"].(string)
+					if sSlug == "" {
+						sSlug, _ = sCol["slug"].(string)
+					}
+					sName, _ := sCol["name"].(string)
+					if strings.EqualFold(sSlug, target) || strings.EqualFold(sSlug, slugify(target)) ||
+						strings.EqualFold(sName, target) || strings.EqualFold(slugify(sName), slugify(target)) {
+						if sMovies, ok := sCol["movies"].([]any); ok && len(sMovies) > 0 {
+							movies = sMovies
+							mCount = len(sMovies)
+							_, _ = coll.UpdateOne(ctx, filter, bson.M{"$set": bson.M{"movies": sMovies, "movieCount": len(sMovies)}})
+							break
+						}
+					}
+				}
+			}
+			if movies != nil && mCount > 0 {
+				return map[string]any{
+					"username": "letterboxd",
+					"source":   "letterboxd",
+					"slug":     slug,
+					"collection": map[string]any{
+						"name":        name,
+						"slug":        slug,
+						"description": desc,
+						"banner":      banner,
+						"movieCount":  mCount,
+						"movies":      movies,
+					},
+				}
 			}
 		}
 	}
@@ -742,19 +827,46 @@ func FindLetterboxdCollection(identifier string) map[string]any {
 			mCount := int(getFloat(doc["movieCount"]))
 			if mList, ok := movies.([]any); ok && mCount == 0 {
 				mCount = len(mList)
+			} else if mList2, ok2 := movies.(bson.A); ok2 && mCount == 0 {
+				mCount = len(mList2)
 			}
-			return map[string]any{
-				"username": "letterboxd",
-				"source":   "letterboxd",
-				"slug":     slug,
-				"collection": map[string]any{
-					"name":        name,
-					"slug":        slug,
-					"description": desc,
-					"banner":      banner,
-					"movieCount":  mCount,
-					"movies":      movies,
-				},
+			// If movies is missing or empty, try seeds to repair!
+			if movies == nil || mCount == 0 {
+				for _, seed := range loadLetterboxdCollections() {
+					sCol, _ := seed["collection"].(map[string]any)
+					if sCol == nil {
+						sCol = seed
+					}
+					sSlug, _ := seed["slug"].(string)
+					if sSlug == "" {
+						sSlug, _ = sCol["slug"].(string)
+					}
+					sName, _ := sCol["name"].(string)
+					if strings.EqualFold(sSlug, target) || strings.EqualFold(sSlug, slugify(target)) ||
+						strings.EqualFold(sName, target) || strings.EqualFold(slugify(sName), slugify(target)) {
+						if sMovies, ok := sCol["movies"].([]any); ok && len(sMovies) > 0 {
+							movies = sMovies
+							mCount = len(sMovies)
+							_, _ = coll.UpdateOne(ctx, filter, bson.M{"$set": bson.M{"movies": sMovies, "movieCount": len(sMovies)}})
+							break
+						}
+					}
+				}
+			}
+			if movies != nil && mCount > 0 {
+				return map[string]any{
+					"username": "letterboxd",
+					"source":   "letterboxd",
+					"slug":     slug,
+					"collection": map[string]any{
+						"name":        name,
+						"slug":        slug,
+						"description": desc,
+						"banner":      banner,
+						"movieCount":  mCount,
+						"movies":      movies,
+					},
+				}
 			}
 		}
 	}
