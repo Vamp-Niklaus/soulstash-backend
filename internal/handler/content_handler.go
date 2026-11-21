@@ -40,6 +40,7 @@ type ContentHandler struct {
 
 func (h *ContentHandler) SetDatabase(db *mongo.Database) {
 	h.db = db
+	setGlobalLetterboxdDB(db)
 }
 
 func NewContentHandler(
@@ -127,6 +128,7 @@ func (h *ContentHandler) RegisterRoutes(r chi.Router) {
 		cr.Get("/collections/letterboxd", h.GetLetterboxdCollections)
 		cr.Get("/letterboxd-collections", h.GetLetterboxdCollections)
 		cr.Get("/letterboxd-collection/{slug}", h.GetLetterboxdCollection)
+		cr.Post("/collections/letterboxd/import", h.ImportCustomLetterboxd)
 
 		// Player sources & embed
 		cr.Get("/player/sources", h.GetPlayerSources)

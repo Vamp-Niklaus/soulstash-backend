@@ -4,10 +4,15 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"soulstash/internal/platform/mongodb"
+
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // TMDB has no "list collections" endpoint. It only offers /search/collection (by name) and
@@ -241,8 +246,8 @@ func tmdbCollectionPoster(detail map[string]any) any {
 	return nil
 }
 
-// SearchTMDBCollections searches TMDB collections (franchises) by name for the navbar
-// "Collections" tab. Publisher is labelled "TMDB" by the SPA.
+// SearchTMDBCollections searches both TMDB collections and Letterboxd collections by name/query
+// for the navbar "Collections" tab. Letterboxd collections are served from MongoDB (cached).
 func (h *ContentHandler) SearchTMDBCollections(w http.ResponseWriter, r *http.Request) {
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	if len([]rune(query)) < 2 {
@@ -250,66 +255,175 @@ func (h *ContentHandler) SearchTMDBCollections(w http.ResponseWriter, r *http.Re
 		return
 	}
 	adminMode := h.searchAdminMode(r)
+	ctx := r.Context()
 
-	data, err := h.tmdbClient.Get(r.Context(), "/3/search/collection", map[string]string{
+	var letterboxdMatches []map[string]any
+
+	// 1. Search Letterboxd collections from MongoDB (Saved & Cached)
+	if h.db != nil {
+		h.EnsureLetterboxdSeeded(ctx)
+		coll := h.db.Collection(mongodb.CollectionLetterboxd)
+		filter := bson.M{
+			"$or": []bson.M{
+				{"name": bson.M{"$regex": regexp.QuoteMeta(query), "$options": "i"}},
+				{"description": bson.M{"$regex": regexp.QuoteMeta(query), "$options": "i"}},
+				{"slug": bson.M{"$regex": regexp.QuoteMeta(query), "$options": "i"}},
+			},
+		}
+		cursor, err := coll.Find(ctx, filter)
+		if err == nil {
+			var docs []bson.M
+			if err := cursor.All(ctx, &docs); err == nil {
+				for _, doc := range docs {
+					slug, _ := doc["slug"].(string)
+					name, _ := doc["name"].(string)
+					desc, _ := doc["description"].(string)
+					banner, _ := doc["banner"].(string)
+					mCount := int(getFloat(doc["movieCount"]))
+					if mList, ok := doc["movies"].([]any); ok && mCount == 0 {
+						mCount = len(mList)
+					}
+					letterboxdMatches = append(letterboxdMatches, map[string]any{
+						"id":            "letterboxd-" + slug,
+						"slug":          slug,
+						"name":          name,
+						"title":         name,
+						"overview":      desc,
+						"description":   desc,
+						"poster_path":   banner,
+						"backdrop_path": banner,
+						"item_count":    mCount,
+						"source":        "letterboxd",
+						"publisher":     "Letterboxd",
+						"media_type":    "Collection",
+					})
+				}
+			}
+		}
+	}
+
+	// 2. Fallback check on memory seed if DB is not available or returned none
+	if len(letterboxdMatches) == 0 {
+		cols := loadLetterboxdCollections()
+		for _, c := range cols {
+			colData, _ := c["collection"].(map[string]any)
+			cName, _ := colData["name"].(string)
+			cDesc, _ := colData["description"].(string)
+			cSlug, _ := c["slug"].(string)
+			cBanner, _ := colData["banner"].(string)
+			cCount := int(getFloat(colData["movieCount"]))
+			if strings.Contains(strings.ToLower(cName), strings.ToLower(query)) ||
+				strings.Contains(strings.ToLower(cDesc), strings.ToLower(query)) {
+				letterboxdMatches = append(letterboxdMatches, map[string]any{
+					"id":            "letterboxd-" + cSlug,
+					"slug":          cSlug,
+					"name":          cName,
+					"title":         cName,
+					"overview":      cDesc,
+					"description":   cDesc,
+					"poster_path":   cBanner,
+					"backdrop_path": cBanner,
+					"item_count":    cCount,
+					"source":        "letterboxd",
+					"publisher":     "Letterboxd",
+					"media_type":    "Collection",
+				})
+			}
+		}
+	}
+
+	// 3. Search TMDB collections
+	data, err := h.tmdbClient.Get(ctx, "/3/search/collection", map[string]string{
 		"query":         query,
 		"include_adult": "false",
 		"language":      "en-US",
 		"page":          "1",
 	})
-	if err != nil || data == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"query": query, "results": []any{}})
-		return
-	}
 
-	raw, _ := data["results"].([]any)
-	if len(raw) > 12 {
-		raw = raw[:12]
-	}
-
-	results := make([]map[string]any, len(raw))
-	var wg sync.WaitGroup
-	for i, entry := range raw {
-		item, ok := entry.(map[string]any)
-		if !ok || getFloat(item["id"]) == 0 {
-			continue
+	var tmdbResults []map[string]any
+	if err == nil && data != nil {
+		raw, _ := data["results"].([]any)
+		if len(raw) > 12 {
+			raw = raw[:12]
 		}
-		wg.Add(1)
-		go func(idx int, item map[string]any) {
-			defer wg.Done()
-			id := int(getFloat(item["id"]))
-			detail := h.tmdbCollectionDetail(r.Context(), id)
-			// Not listed: collection with no movies, or one the current admin mode may not see.
-			if detail == nil || !h.tmdbCollectionVisible(detail, adminMode) {
-				return
+		slots := make([]map[string]any, len(raw))
+		var wg sync.WaitGroup
+		for i, entry := range raw {
+			item, ok := entry.(map[string]any)
+			if !ok || getFloat(item["id"]) == 0 {
+				continue
 			}
-			name, _ := detail["name"].(string)
-			if name == "" {
-				name, _ = item["name"].(string)
+			wg.Add(1)
+			go func(idx int, item map[string]any) {
+				defer wg.Done()
+				id := int(getFloat(item["id"]))
+				detail := h.tmdbCollectionDetail(ctx, id)
+				if detail == nil || !h.tmdbCollectionVisible(detail, adminMode) {
+					return
+				}
+				name, _ := detail["name"].(string)
+				if name == "" {
+					name, _ = item["name"].(string)
+				}
+				overview, _ := detail["overview"].(string)
+				if overview == "" {
+					overview, _ = item["overview"].(string)
+				}
+				slots[idx] = map[string]any{
+					"id":            id,
+					"tmdbId":        id,
+					"name":          name,
+					"title":         name,
+					"overview":      overview,
+					"description":   overview,
+					"poster_path":   tmdbCollectionPoster(detail),
+					"backdrop_path": detail["backdrop_path"],
+					"item_count":    len(tmdbCollectionParts(detail)),
+					"source":        "tmdb",
+					"publisher":     "TMDB",
+					"media_type":    "Collection",
+				}
+			}(i, item)
+		}
+		wg.Wait()
+		for _, s := range slots {
+			if s != nil {
+				tmdbResults = append(tmdbResults, s)
 			}
-			overview, _ := detail["overview"].(string)
-			if overview == "" {
-				overview, _ = item["overview"].(string)
-			}
-			results[idx] = map[string]any{
-				"id":            id,
+		}
+	}
+
+	// 4. If neither TMDB nor MongoDB matched anything and query length >= 3,
+	// dynamically resolve from TMDB / Letterboxd topic, cache in MongoDB, and include in search results!
+	if len(letterboxdMatches) == 0 && len(tmdbResults) == 0 && len([]rune(query)) >= 3 {
+		dynamicCol, err := h.ResolveDynamicLetterboxdCollection(ctx, query)
+		if err == nil && dynamicCol != nil {
+			cMap, _ := dynamicCol["collection"].(map[string]any)
+			slug, _ := dynamicCol["slug"].(string)
+			name, _ := cMap["name"].(string)
+			desc, _ := cMap["description"].(string)
+			banner, _ := cMap["banner"].(string)
+			mCount := int(getFloat(cMap["movieCount"]))
+			letterboxdMatches = append(letterboxdMatches, map[string]any{
+				"id":            "letterboxd-" + slug,
+				"slug":          slug,
 				"name":          name,
-				"overview":      overview,
-				"poster_path":   tmdbCollectionPoster(detail),
-				"backdrop_path": detail["backdrop_path"],
-				"item_count":    len(tmdbCollectionParts(detail)),
-			}
-		}(i, item)
-	}
-	wg.Wait()
-
-	valid := make([]map[string]any, 0, len(results))
-	for _, res := range results {
-		if res != nil {
-			valid = append(valid, res)
+				"title":         name,
+				"overview":      desc,
+				"description":   desc,
+				"poster_path":   banner,
+				"backdrop_path": banner,
+				"item_count":    mCount,
+				"source":        "letterboxd",
+				"publisher":     "Letterboxd",
+				"media_type":    "Collection",
+			})
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"query": query, "results": valid})
+
+	// Merge Letterboxd results and TMDB results
+	allResults := append(letterboxdMatches, tmdbResults...)
+	writeJSON(w, http.StatusOK, map[string]any{"query": query, "results": allResults})
 }
 
 func (h *ContentHandler) resolveCollectionSlot(ctx context.Context, id int, adminMode int) map[string]any {

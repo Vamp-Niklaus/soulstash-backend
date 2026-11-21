@@ -22,6 +22,7 @@ const (
 	CollectionTrafficLogs   = "TrafficLogsMonolith"
 	CollectionAdminSettings = "admin_setting_monolith"
 	CollectionPasswordReset = "password_resets"
+	CollectionLetterboxd    = "letterboxd_collections"
 
 	DocIDRatingsMetrics = "ratings_api_counters"
 	DocIDMultimovies    = "multimovies"
