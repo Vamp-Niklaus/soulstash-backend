@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -707,7 +708,197 @@ func (h *ContentHandler) GetSeriesImages(w http.ResponseWriter, r *http.Request)
 
 func (h *ContentHandler) GetSeriesCredits(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	h.fetchProxy(w, r, fmt.Sprintf("/3/tv/%s/credits", id))
+	ctx := r.Context()
+
+	// 1. Fetch aggregate_credits which combines cast and crew across all seasons and episodes
+	data, err := h.tmdbClient.Get(ctx, fmt.Sprintf("/3/tv/%s/aggregate_credits", id), requestQueryParams(r))
+	if err != nil || data == nil || (data["cast"] == nil && data["crew"] == nil) {
+		// Fallback to standard /credits proxy if aggregate_credits fails or is empty
+		h.fetchProxy(w, r, fmt.Sprintf("/3/tv/%s/credits", id))
+		return
+	}
+
+	// 2. Score, rank, and sort the merged season/episode cast and crew
+	h.processAndScoreSeriesCredits(data)
+
+	writeJSON(w, http.StatusOK, data)
+}
+
+func (h *ContentHandler) processAndScoreSeriesCredits(data map[string]any) {
+	if data == nil {
+		return
+	}
+
+	// 1. Process Cast across seasons & episodes
+	if rawCast, ok := data["cast"].([]any); ok && len(rawCast) > 0 {
+		type rankedItem struct {
+			item       map[string]any
+			score      float64
+			episodes   int
+			order      int
+			popularity float64
+		}
+
+		rankedCast := make([]rankedItem, 0, len(rawCast))
+
+		for _, rc := range rawCast {
+			cMap, ok := rc.(map[string]any)
+			if !ok {
+				continue
+			}
+
+			// Extract character names and episode counts across roles
+			var charParts []string
+			rolesEpisodes := 0
+			if roles, ok := cMap["roles"].([]any); ok {
+				for _, r := range roles {
+					if rMap, ok := r.(map[string]any); ok {
+						if ch, ok := rMap["character"].(string); ok && strings.TrimSpace(ch) != "" {
+							charParts = append(charParts, strings.TrimSpace(ch))
+						}
+						rolesEpisodes += int(getFloat(rMap["episode_count"]))
+					}
+				}
+			}
+
+			if len(charParts) > 0 {
+				cMap["character"] = strings.Join(charParts, " / ")
+			}
+
+			// Frequency: total episodes appeared in
+			episodes := int(getFloat(cMap["total_episode_count"]))
+			if episodes <= 0 {
+				episodes = rolesEpisodes
+			}
+			if episodes <= 0 {
+				episodes = 1
+			}
+			cMap["total_episode_count"] = episodes
+
+			// Default coming order
+			orderVal := 999
+			if rawOrder, hasOrder := cMap["order"]; hasOrder {
+				orderVal = int(getFloat(rawOrder))
+				if orderVal < 0 {
+					orderVal = 999
+				}
+			}
+
+			pop := getFloat(cMap["popularity"])
+
+			// Formula balancing frequency and default coming order:
+			// - Order score: 1000 / (order + 1) -> top billed actors get strong priority
+			// - Frequency score: total_episode_count * 15.0 -> actors appearing in many episodes get high score
+			// - Popularity weight: popularity * 2.0 -> fine tie-breaking
+			orderWeight := 1000.0 / float64(orderVal+1)
+			freqWeight := float64(episodes) * 15.0
+			popWeight := pop * 2.0
+			totalScore := orderWeight + freqWeight + popWeight
+
+			rankedCast = append(rankedCast, rankedItem{
+				item:       cMap,
+				score:      totalScore,
+				episodes:   episodes,
+				order:      orderVal,
+				popularity: pop,
+			})
+		}
+
+		// Sort by score descending
+		sort.SliceStable(rankedCast, func(i, j int) bool {
+			if math.Abs(rankedCast[i].score-rankedCast[j].score) > 0.01 {
+				return rankedCast[i].score > rankedCast[j].score
+			}
+			if rankedCast[i].episodes != rankedCast[j].episodes {
+				return rankedCast[i].episodes > rankedCast[j].episodes
+			}
+			if rankedCast[i].popularity != rankedCast[j].popularity {
+				return rankedCast[i].popularity > rankedCast[j].popularity
+			}
+			return rankedCast[i].order < rankedCast[j].order
+		})
+
+		resultCast := make([]any, len(rankedCast))
+		for i, rc := range rankedCast {
+			rc.item["ranking"] = i + 1
+			rc.item["score"] = math.Round(rc.score*10) / 10
+			resultCast[i] = rc.item
+		}
+		data["cast"] = resultCast
+	}
+
+	// 2. Process Crew across seasons & episodes
+	if rawCrew, ok := data["crew"].([]any); ok && len(rawCrew) > 0 {
+		type rankedCrewItem struct {
+			item       map[string]any
+			score      float64
+			episodes   int
+			popularity float64
+		}
+
+		rankedCrew := make([]rankedCrewItem, 0, len(rawCrew))
+
+		for _, rc := range rawCrew {
+			cMap, ok := rc.(map[string]any)
+			if !ok {
+				continue
+			}
+
+			var jobParts []string
+			jobsEpisodes := 0
+			if jobs, ok := cMap["jobs"].([]any); ok {
+				for _, j := range jobs {
+					if jMap, ok := j.(map[string]any); ok {
+						if jTitle, ok := jMap["job"].(string); ok && strings.TrimSpace(jTitle) != "" {
+							jobParts = append(jobParts, strings.TrimSpace(jTitle))
+						}
+						jobsEpisodes += int(getFloat(jMap["episode_count"]))
+					}
+				}
+			}
+
+			if len(jobParts) > 0 {
+				cMap["job"] = strings.Join(jobParts, ", ")
+			}
+
+			episodes := int(getFloat(cMap["total_episode_count"]))
+			if episodes <= 0 {
+				episodes = jobsEpisodes
+			}
+			if episodes <= 0 {
+				episodes = 1
+			}
+			cMap["total_episode_count"] = episodes
+
+			pop := getFloat(cMap["popularity"])
+			totalScore := (float64(episodes) * 15.0) + (pop * 2.0)
+
+			rankedCrew = append(rankedCrew, rankedCrewItem{
+				item:       cMap,
+				score:      totalScore,
+				episodes:   episodes,
+				popularity: pop,
+			})
+		}
+
+		sort.SliceStable(rankedCrew, func(i, j int) bool {
+			if math.Abs(rankedCrew[i].score-rankedCrew[j].score) > 0.01 {
+				return rankedCrew[i].score > rankedCrew[j].score
+			}
+			if rankedCrew[i].episodes != rankedCrew[j].episodes {
+				return rankedCrew[i].episodes > rankedCrew[j].episodes
+			}
+			return rankedCrew[i].popularity > rankedCrew[j].popularity
+		})
+
+		resultCrew := make([]any, len(rankedCrew))
+		for i, rc := range rankedCrew {
+			rc.item["ranking"] = i + 1
+			rc.item["score"] = math.Round(rc.score*10) / 10
+			resultCrew[i] = rc.item
+		}
+		data["crew"] = resultCrew
+	}
 }
 
 func (h *ContentHandler) GetSeriesDetail(w http.ResponseWriter, r *http.Request) {
