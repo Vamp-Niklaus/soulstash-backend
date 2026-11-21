@@ -601,19 +601,37 @@ func (h *ContentHandler) GetFeaturedTMDBCollections(w http.ResponseWriter, r *ht
 		if page > curatedPages {
 			discoverPage = page - curatedPages + 1
 		}
-		searchQueries := []string{"Collection", "Trilogy", "Saga", "Chronicles"}
-		queryIdx := (discoverPage - 1) % len(searchQueries)
-		tmdbApiPage := ((discoverPage - 1) / len(searchQueries)) + 1
+		searchQueries := []string{"Collection", "Trilogy", "Saga", "Chronicles", "Universe", "Series", "Films", "Anthology", "Movies", "Cinematic", "Adventures", "Legends", "Classics"}
 
-		found, err := h.tmdbClient.Get(r.Context(), "/3/search/collection", map[string]string{
-			"query":         searchQueries[queryIdx],
-			"include_adult": "false",
-			"language":      "en-US",
-			"page":          strconv.Itoa(tmdbApiPage),
-		})
-		if err == nil && found != nil {
+		seenIds := make(map[int]bool)
+		for _, e := range entries {
+			if id, ok := e["tmdbId"].(int); ok {
+				seenIds[id] = true
+			}
+		}
+
+		for attempt := 0; attempt < 3 && len(entries) < limit; attempt++ {
+			currentDiscoverPage := discoverPage + attempt
+			queryIdx := (currentDiscoverPage - 1) % len(searchQueries)
+			tmdbApiPage := ((currentDiscoverPage - 1) / len(searchQueries)) + 1
+
+			found, err := h.tmdbClient.Get(r.Context(), "/3/search/collection", map[string]string{
+				"query":         searchQueries[queryIdx],
+				"include_adult": "false",
+				"language":      "en-US",
+				"page":          strconv.Itoa(tmdbApiPage),
+			})
+			if err != nil || found == nil {
+				continue
+			}
 			list, _ := found["results"].([]any)
-			sem := make(chan struct{}, 8)
+			if len(list) == 0 {
+				continue
+			}
+			if len(list) > 8 {
+				list = list[:8]
+			}
+			sem := make(chan struct{}, 6)
 			var wg sync.WaitGroup
 			discoveredSlots := make([]map[string]any, len(list))
 			for i, entry := range list {
@@ -632,12 +650,6 @@ func (h *ContentHandler) GetFeaturedTMDBCollections(w http.ResponseWriter, r *ht
 			}
 			wg.Wait()
 
-			seenIds := make(map[int]bool)
-			for _, e := range entries {
-				if id, ok := e["tmdbId"].(int); ok {
-					seenIds[id] = true
-				}
-			}
 			for _, slot := range discoveredSlots {
 				if slot != nil {
 					id, _ := slot["tmdbId"].(int)

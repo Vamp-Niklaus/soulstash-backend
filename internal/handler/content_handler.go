@@ -55,7 +55,7 @@ func NewContentHandler(
 	if len(watchmodeAPIKey) > 0 {
 		watchmodeKey = strings.TrimSpace(watchmodeAPIKey[0])
 	}
-	return &ContentHandler{
+	handler := &ContentHandler{
 		tmdbClient:      tmdbClient,
 		ratingsSvc:      ratingsSvc,
 		adultEngine:     adultEngine,
@@ -63,6 +63,8 @@ func NewContentHandler(
 		jwtSecret:       jwtSecret,
 		watchmodeAPIKey: watchmodeKey,
 	}
+	setGlobalLetterboxdContentHandler(handler)
+	return handler
 }
 
 func (h *ContentHandler) RegisterRoutes(r chi.Router) {

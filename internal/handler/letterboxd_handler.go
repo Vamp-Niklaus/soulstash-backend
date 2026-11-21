@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strconv"
 	"regexp"
 	"strings"
 	"sync"
@@ -23,17 +25,72 @@ import (
 var letterboxdFeaturedJSON []byte
 
 var (
-	letterboxdOnce        sync.Once
-	letterboxdCollections []map[string]any
-	letterboxdSeededOnce  sync.Once
-	globalLetterboxdDB    *mongo.Database
-	globalLetterboxdLock  sync.RWMutex
+	letterboxdOnce                 sync.Once
+	letterboxdCollections          []map[string]any
+	letterboxdSeededOnce           sync.Once
+	globalLetterboxdDB             *mongo.Database
+	globalLetterboxdContentHandler *ContentHandler
+	globalLetterboxdLock           sync.RWMutex
 )
 
 func setGlobalLetterboxdDB(db *mongo.Database) {
 	globalLetterboxdLock.Lock()
 	defer globalLetterboxdLock.Unlock()
 	globalLetterboxdDB = db
+}
+
+func setGlobalLetterboxdContentHandler(h *ContentHandler) {
+	globalLetterboxdLock.Lock()
+	defer globalLetterboxdLock.Unlock()
+	globalLetterboxdContentHandler = h
+}
+
+var letterboxdCuratedThemes = []struct {
+	Slug        string
+	Name        string
+	Description string
+	Query       string
+}{
+	{"letterboxd-top-250", "Letterboxd Official Top 250", "The 250 highest-rated films of all time on Letterboxd.", "top rated cinema"},
+	{"letterboxd-popular", "Letterboxd Most Popular Films", "The most logged and watched movies by the global Letterboxd community.", "popular cinema"},
+	{"best-of-a24", "Best of A24 Ranked", "Every genre-defying, acclaimed release from indie juggernaut A24.", "A24"},
+	{"studio-ghibli", "Studio Ghibli Complete Collection", "Hayao Miyazaki and Isao Takahata's timeless hand-drawn animated classics.", "Miyazaki Ghibli"},
+	{"sight-and-sound-greatest", "Sight & Sound Critics Greatest Films", "The decennial international critics poll of the greatest cinema in history.", "greatest cinema masterpieces"},
+	{"1001-movies-must-see", "1001 Movies You Must See Before You Die", "The definitive, essential cinematic milestones everyone must experience once.", "classic masterpiece"},
+	{"top-scifi-masterpieces", "Top Sci-Fi Masterpieces", "Mind-bending journeys through space, time, dystopian futures, and artificial intellect.", "sci-fi space dystopia"},
+	{"top-horror-masterpieces", "Top Horror Masterpieces", "The terrifying, atmospheric, and psychological horror benchmarks rated highest on Letterboxd.", "horror psychological"},
+	{"fan-favorites-2024-2025", "Letterboxd Fan Favorites (2024–2025)", "The defining modern theatrical sensations, festival darlings, and viral triumphs.", "award winning movies"},
+	{"neo-noir-cyberpunk", "Neo-Noir & Cyberpunk Essentials", "Rain-slicked streets, cynical detectives, and high-tech dystopias.", "cyberpunk noir detective"},
+	{"palme-dor-cannes", "Palme d'Or & Festival Winners", "Prestigious Cannes and European film festival triumphs celebrated by cinephiles.", "Cannes Palme d'Or"},
+	{"academy-best-picture", "Best Picture Winners Ranked", "Oscar Best Picture winners ranked by Letterboxd audience esteem.", "Academy Award winner"},
+	{"90s-cult-classics", "90s Cult Classics & Benchmarks", "The unforgettable, rebellious, and boundary-pushing gems of the 1990s.", "cult classic 1990s"},
+	{"tarantino-favorites", "Quentin Tarantino's Cinema Universe", "Electrifying dialogue, nonlinear storytelling, and hyper-stylized cinema.", "Tarantino crime cinema"},
+	{"christopher-nolan-mindbenders", "Christopher Nolan & Mind-Benders", "Time puzzles, practical spectacles, and mind-bending conceptual thrillers.", "mind bending concept thriller"},
+	{"scorsese-essentials", "Martin Scorsese Essential Cinema", "Gritty street epics, character studies, and cinematic masterpieces from the maestro.", "Scorsese crime mafia"},
+	{"modern-horror-renaissance", "Modern Horror Renaissance", "Atmospheric dread, folk terror, and visionary modern horror auteurs.", "modern horror folk dread"},
+	{"asian-cinema-masterpieces", "Asian Cinema Masterpieces", "Groundbreaking masterpieces from South Korea, Japan, Hong Kong, and Taiwan.", "Korean Japanese thriller cinema"},
+	{"french-new-wave", "French New Wave & European Arthouse", "Revolutionary jump cuts, poetic realism, and auteur cinema.", "French European arthouse"},
+	{"anime-film-masterpieces", "Anime Film Masterpieces", "Iconic anime features from Makoto Shinkai, Satoshi Kon, and Mamoru Hosoda.", "anime feature film masterpiece"},
+	{"psychological-thrillers", "Psychological Thrillers Ranked", "Twisted games, unreliable narrators, and claustrophobic tension.", "psychological thriller mystery"},
+	{"coming-of-age-masterpieces", "Coming-of-Age Cinema", "Bittersweet nostalgia, youthful discovery, and formative life lessons.", "coming of age youth drama"},
+	{"indie-gems-ranked", "Top Rated Indie Gems", "Low-budget triumphs that captured hearts with raw emotion and original voices.", "independent Sundance festival film"},
+	{"dystopian-post-apocalyptic", "Dystopian & Post-Apocalyptic", "Desolate wastelands, totalitarian regimes, and survival against all odds.", "post-apocalyptic survival dystopia"},
+	{"epic-historical-war", "Epic Historical & War Masterpieces", "Sweeping battlefields, ancient empires, and deeply human wartime stories.", "historical war epic battle"},
+	{"whodunit-mystery", "Letterboxd Whodunits & Mysteries", "Locked-room puzzles, sharp detectives, and shocking twists.", "whodunit murder mystery detective"},
+	{"action-cinema-hall-of-fame", "Action Cinema Hall of Fame", "Unrelenting stunts, masterclass choreography, and adrenaline-pumping classics.", "action martial arts stunt"},
+	{"surrealist-cinema", "Surrealist & Dream Arthouse", "Lynchian dreamscapes, abstract visions, and cinema of the subconscious.", "surrealist dream film"},
+	{"cozy-comfort-movies", "Letterboxd Comfort Cinema", "Warm, uplifting, and beautifully gentle films to soothe the soul.", "feel-good comfort wholesome comedy"},
+	{"dark-comedy-benchmarks", "Dark Comedy Benchmarks", "Morbid humor, sharp satire, and delightfully cynical laughs.", "dark comedy satire humor"},
+	{"21st-century-masterpieces", "21st Century Masterpieces", "The absolute pinnacles of cinema released from 2000 to the present day.", "contemporary masterpiece cinema"},
+	{"directorial-debuts", "Greatest Directorial Debuts", "Visionary first features that stunned audiences and announced legendary filmmakers.", "directorial debut breakthrough film"},
+	{"space-odysseys", "Cosmic & Space Odysseys", "The infinite void, interstellar travel, and humanity's place in the universe.", "space exploration interstellar cosmic"},
+	{"spaghetti-westerns", "Spaghetti Western Classics", "Sergio Leone, dusty showdowns, iconic score, and frontier vengeance.", "spaghetti western Sergio Leone showdown"},
+	{"stop-motion-animation", "Stop-Motion Animation Gems", "Intricate puppetry, Laika, Aardman, and handmade cinematic wizardry.", "stop motion animation claymation"},
+	{"heist-crime-thrillers", "High-Stakes Heist & Crime", "Meticulous plans, cunning thieves, safe-cracking, and breathless getaways.", "heist crime robbery crew"},
+	{"poetic-romances", "Poetic & Heartfelt Romances", "Deep emotional connections, bittersweet longing, and sweeping love stories.", "romance love drama poetic"},
+	{"time-travel-cinema", "Time Travel & Temporal Paradox", "Looped realities, butterfly effects, and temporal mechanics.", "time travel temporal paradox loop"},
+	{"criterion-essentials", "The Criterion Collection Essentials", "Significant, restored, and historic cinema from around the world.", "criterion collection classic restored"},
+	{"modern-sci-fi", "Modern Sci-Fi Renaissance", "Philosophical sci-fi, first contact, and cerebral speculative fiction.", "speculative fiction philosophical sci-fi"},
 }
 
 func loadLetterboxdCollections() []map[string]any {
@@ -102,11 +159,22 @@ func (h *ContentHandler) EnsureLetterboxdSeeded(ctx context.Context) {
 }
 
 // GetLetterboxdCollections returns Letterboxd collections.
-// If MongoDB is connected, it serves directly from MongoDB (cached).
-// Never hits Letterboxd directly if cached.
+// Supports endless pagination (?page=1&limit=10) and text search (?q=...).
+// Serves directly from MongoDB cache with dynamic theme resolution on demand.
 func (h *ContentHandler) GetLetterboxdCollections(w http.ResponseWriter, r *http.Request) {
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	pageStr := strings.TrimSpace(r.URL.Query().Get("page"))
+	limitStr := strings.TrimSpace(r.URL.Query().Get("limit"))
 	ctx := r.Context()
+
+	page := 1
+	limit := 10
+	if p, err := strconv.Atoi(pageStr); err == nil && p > 0 {
+		page = p
+	}
+	if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 50 {
+		limit = l
+	}
 
 	if h.db != nil {
 		h.EnsureLetterboxdSeeded(ctx)
@@ -123,37 +191,84 @@ func (h *ContentHandler) GetLetterboxdCollections(w http.ResponseWriter, r *http
 			}
 		}
 
-		opts := options.Find().SetSort(bson.M{"updatedAt": -1})
+		offset := (page - 1) * limit
+		opts := options.Find().SetSort(bson.M{"updatedAt": -1}).SetSkip(int64(offset)).SetLimit(int64(limit))
 		cursor, err := coll.Find(ctx, filter, opts)
 		if err == nil {
 			var docs []bson.M
-			if err := cursor.All(ctx, &docs); err == nil && len(docs) > 0 {
-				results := make([]map[string]any, 0, len(docs))
-				for _, doc := range docs {
-					slug, _ := doc["slug"].(string)
-					name, _ := doc["name"].(string)
-					desc, _ := doc["description"].(string)
-					banner, _ := doc["banner"].(string)
-					movies := doc["movies"]
-					mCount := int(getFloat(doc["movieCount"]))
-					if mList, ok := movies.([]any); ok && mCount == 0 {
-						mCount = len(mList)
-					}
-
-					results = append(results, map[string]any{
-						"username": "letterboxd",
-						"source":   "letterboxd",
-						"slug":     slug,
-						"collection": map[string]any{
-							"name":        name,
-							"slug":        slug,
-							"description": desc,
-							"banner":      banner,
-							"movieCount":  mCount,
-							"movies":      movies,
-						},
-					})
+			_ = cursor.All(ctx, &docs)
+			results := make([]map[string]any, 0, len(docs))
+			for _, doc := range docs {
+				slug, _ := doc["slug"].(string)
+				name, _ := doc["name"].(string)
+				desc, _ := doc["description"].(string)
+				banner, _ := doc["banner"].(string)
+				movies := doc["movies"]
+				mCount := int(getFloat(doc["movieCount"]))
+				if mList, ok := movies.([]any); ok && mCount == 0 {
+					mCount = len(mList)
 				}
+				results = append(results, map[string]any{
+					"username": "letterboxd",
+					"source":   "letterboxd",
+					"slug":     slug,
+					"collection": map[string]any{
+						"name":        name,
+						"slug":        slug,
+						"description": desc,
+						"banner":      banner,
+						"movieCount":  mCount,
+						"movies":      movies,
+					},
+				})
+			}
+
+			// If we need more collections for infinite scrolling, dynamically resolve curated themes!
+			if len(results) < limit && q == "" {
+				for idx := offset; idx < offset+limit && len(results) < limit; idx++ {
+					if idx < len(letterboxdCuratedThemes) {
+						theme := letterboxdCuratedThemes[idx]
+						// Check if already in DB
+						if existing := h.findLetterboxdDocInDB(ctx, theme.Slug); existing != nil {
+							results = append(results, existing)
+							continue
+						}
+						// Dynamically resolve theme from TMDB
+						if resolved, rErr := h.ResolveDynamicLetterboxdCollection(ctx, theme.Query); rErr == nil && resolved != nil {
+							if cMap, ok := resolved["collection"].(map[string]any); ok {
+								cMap["name"] = theme.Name
+								cMap["slug"] = theme.Slug
+								cMap["description"] = theme.Description
+								resolved["slug"] = theme.Slug
+								h.saveLetterboxdDocToDB(ctx, resolved)
+							}
+							results = append(results, resolved)
+						}
+					} else {
+						// Beyond curated themes: generate infinite spotlight themes
+						genreQueries := []string{"Cinema Masters", "Cult Classics", "Neo-Noir", "Arthouse Gems", "Psychological Thrillers", "Sci-Fi Benchmarks", "High Adrenaline Action", "Horror Vanguard"}
+						gQuery := genreQueries[idx%len(genreQueries)]
+						slug := fmt.Sprintf("letterboxd-spotlight-%d", idx)
+						name := fmt.Sprintf("Letterboxd Spotlight: %s (Vol. %d)", gQuery, (idx/len(genreQueries))+1)
+						if existing := h.findLetterboxdDocInDB(ctx, slug); existing != nil {
+							results = append(results, existing)
+							continue
+						}
+						if resolved, rErr := h.ResolveDynamicLetterboxdCollection(ctx, gQuery); rErr == nil && resolved != nil {
+							if cMap, ok := resolved["collection"].(map[string]any); ok {
+								cMap["name"] = name
+								cMap["slug"] = slug
+								cMap["description"] = fmt.Sprintf("A curated Letterboxd showcase celebrating %s.", gQuery)
+								resolved["slug"] = slug
+								h.saveLetterboxdDocToDB(ctx, resolved)
+							}
+							results = append(results, resolved)
+						}
+					}
+				}
+			}
+
+			if len(results) > 0 || pageStr != "" {
 				writeJSON(w, http.StatusOK, results)
 				return
 			}
@@ -180,13 +295,57 @@ func (h *ContentHandler) GetLetterboxdCollections(w http.ResponseWriter, r *http
 	if cols == nil {
 		cols = []map[string]any{}
 	}
-	writeJSON(w, http.StatusOK, cols)
+	offset := (page - 1) * limit
+	if offset >= len(cols) {
+		writeJSON(w, http.StatusOK, []map[string]any{})
+		return
+	}
+	end := offset + limit
+	if end > len(cols) {
+		end = len(cols)
+	}
+	writeJSON(w, http.StatusOK, cols[offset:end])
+}
+
+func (h *ContentHandler) findLetterboxdDocInDB(ctx context.Context, slug string) map[string]any {
+	if h.db == nil || slug == "" {
+		return nil
+	}
+	coll := h.db.Collection(mongodb.CollectionLetterboxd)
+	filter := bson.M{"$or": []bson.M{{"_id": slug}, {"slug": slug}}}
+	var doc bson.M
+	if err := coll.FindOne(ctx, filter).Decode(&doc); err == nil && doc != nil {
+		dSlug, _ := doc["slug"].(string)
+		name, _ := doc["name"].(string)
+		desc, _ := doc["description"].(string)
+		banner, _ := doc["banner"].(string)
+		movies := doc["movies"]
+		mCount := int(getFloat(doc["movieCount"]))
+		if mList, ok := movies.([]any); ok && mCount == 0 {
+			mCount = len(mList)
+		}
+		return map[string]any{
+			"username": "letterboxd",
+			"source":   "letterboxd",
+			"slug":     dSlug,
+			"collection": map[string]any{
+				"name":        name,
+				"slug":        dSlug,
+				"description": desc,
+				"banner":      banner,
+				"movieCount":  mCount,
+				"movies":      movies,
+			},
+		}
+	}
+	return nil
 }
 
 // GetLetterboxdCollection returns a single Letterboxd collection by slug or name.
 // First serves from MongoDB cache (0ms). If cache miss, dynamically resolves and caches in MongoDB.
 func (h *ContentHandler) GetLetterboxdCollection(w http.ResponseWriter, r *http.Request) {
 	slug := strings.TrimSpace(chi.URLParam(r, "slug"))
+	if u, err := url.PathUnescape(slug); err == nil && u != "" { slug = u } else if u, err := url.QueryUnescape(slug); err == nil && u != "" { slug = u }
 	if slug == "" {
 		slug = strings.TrimSpace(r.URL.Query().Get("slug"))
 	}
@@ -212,6 +371,7 @@ func (h *ContentHandler) FindOrResolveLetterboxdCollection(ctx context.Context, 
 	if identifier == "" {
 		return nil
 	}
+	if u, err := url.PathUnescape(identifier); err == nil && u != "" { identifier = u } else if u, err := url.QueryUnescape(identifier); err == nil && u != "" { identifier = u }
 	target := strings.TrimSpace(identifier)
 
 	// 1. Check MongoDB first (Saved & Cached)
@@ -544,7 +704,13 @@ func FindLetterboxdCollection(identifier string) map[string]any {
 	if identifier == "" {
 		return nil
 	}
+	if u, err := url.PathUnescape(identifier); err == nil && u != "" {
+		identifier = u
+	} else if u, err := url.QueryUnescape(identifier); err == nil && u != "" {
+		identifier = u
+	}
 	target := strings.ToLower(strings.TrimSpace(identifier))
+	targetSlug := slugify(target)
 
 	// 1. Check MongoDB first if DB is available
 	globalLetterboxdLock.RLock()
@@ -559,9 +725,11 @@ func FindLetterboxdCollection(identifier string) map[string]any {
 		filter := bson.M{
 			"$or": []bson.M{
 				{"_id": target},
+				{"_id": targetSlug},
 				{"slug": target},
-				{"slug": slugify(target)},
+				{"slug": targetSlug},
 				{"name": bson.M{"$regex": "^" + regexp.QuoteMeta(target) + "$", "$options": "i"}},
+				{"name": bson.M{"$regex": "^" + regexp.QuoteMeta(strings.ReplaceAll(targetSlug, "-", " ")) + "$", "$options": "i"}},
 			},
 		}
 		var doc bson.M
@@ -595,19 +763,32 @@ func FindLetterboxdCollection(identifier string) map[string]any {
 	cols := loadLetterboxdCollections()
 	for _, entry := range cols {
 		slug, _ := entry["slug"].(string)
-		if strings.EqualFold(slug, target) || strings.EqualFold(slug, slugify(target)) {
+		if strings.EqualFold(slug, target) || strings.EqualFold(slug, targetSlug) {
 			return entry
 		}
 		if col, ok := entry["collection"].(map[string]any); ok {
 			colSlug, _ := col["slug"].(string)
-			if strings.EqualFold(colSlug, target) || strings.EqualFold(colSlug, slugify(target)) {
+			if strings.EqualFold(colSlug, target) || strings.EqualFold(colSlug, targetSlug) {
 				return entry
 			}
 			colName, _ := col["name"].(string)
-			if strings.EqualFold(colName, target) || strings.EqualFold(strings.ReplaceAll(colName, " ", "-"), target) {
+			if strings.EqualFold(colName, target) || strings.EqualFold(slugify(colName), targetSlug) {
 				return entry
 			}
 		}
 	}
+
+	// 3. Fallback: dynamically resolve on cache miss if content handler is set
+	globalLetterboxdLock.RLock()
+	h := globalLetterboxdContentHandler
+	globalLetterboxdLock.RUnlock()
+	if h != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		if resolved, err := h.ResolveDynamicLetterboxdCollection(ctx, target); err == nil && resolved != nil {
+			return resolved
+		}
+	}
+
 	return nil
 }

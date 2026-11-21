@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
@@ -593,9 +594,27 @@ func (h *CollectionHandler) GetPublicCollection(w http.ResponseWriter, r *http.R
 	username := chi.URLParam(r, "username")
 	collectionName := chi.URLParam(r, "collectionName")
 
+	if u, err := url.PathUnescape(username); err == nil && u != "" {
+		username = u
+	} else if u, err := url.QueryUnescape(username); err == nil && u != "" {
+		username = u
+	}
+	if u, err := url.PathUnescape(collectionName); err == nil && u != "" {
+		collectionName = u
+	} else if u, err := url.QueryUnescape(collectionName); err == nil && u != "" {
+		collectionName = u
+	}
+
 	if strings.EqualFold(username, "letterboxd") {
-		if col := FindLetterboxdCollection(collectionName); col != nil {
+		col := FindLetterboxdCollection(collectionName)
+		if col == nil {
+			col = FindLetterboxdCollection(slugify(collectionName))
+		}
+		if col != nil {
 			cMap, _ := col["collection"].(map[string]any)
+			if cMap == nil {
+				cMap = col
+			}
 			movies, _ := cMap["movies"].([]any)
 			if movies == nil {
 				if mList, ok := cMap["movies"].([]map[string]any); ok {
@@ -604,14 +623,24 @@ func (h *CollectionHandler) GetPublicCollection(w http.ResponseWriter, r *http.R
 					}
 				}
 			}
+			name, _ := cMap["name"].(string)
+			if name == "" {
+				name = collectionName
+			}
+			slug, _ := col["slug"].(string)
+			if slug == "" {
+				slug = slugify(name)
+			}
+			desc, _ := cMap["description"].(string)
+			banner, _ := cMap["banner"].(string)
 			writeJSON(w, http.StatusOK, []map[string]any{{
-				"_id":         col["slug"],
-				"name":        cMap["name"],
+				"_id":         slug,
+				"name":        name,
 				"isDeletable": false,
 				"isPublic":    true,
 				"isPublished": true,
-				"description": cMap["description"],
-				"banner":      collectionResponseBanner(fmt.Sprint(cMap["banner"])),
+				"description": desc,
+				"banner":      collectionResponseBanner(banner),
 				"movieCount":  len(movies),
 				"movies":      movies,
 				"source":      "letterboxd",
