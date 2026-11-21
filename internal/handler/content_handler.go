@@ -124,6 +124,9 @@ func (h *ContentHandler) RegisterRoutes(r chi.Router) {
 		cr.Get("/search/users", h.SearchUsers)
 		cr.Get("/search/collections", h.SearchTMDBCollections)
 		cr.Get("/tmdb-collections/featured", h.GetFeaturedTMDBCollections)
+		cr.Get("/collections/letterboxd", h.GetLetterboxdCollections)
+		cr.Get("/letterboxd-collections", h.GetLetterboxdCollections)
+		cr.Get("/letterboxd-collection/{slug}", h.GetLetterboxdCollection)
 
 		// Player sources & embed
 		cr.Get("/player/sources", h.GetPlayerSources)

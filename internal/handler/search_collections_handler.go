@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -136,6 +137,41 @@ var tmdbFeaturedCollectionNames = []string{
 	"Sing Collection",
 	"The Secret Life of Pets Collection",
 	"Puss in Boots Collection",
+	"The Hobbit Collection",
+	"Star Trek Collection",
+	"Godzilla Collection",
+	"King Kong Collection",
+	"Predator Collection",
+	"RoboCop Collection",
+	"Blade Collection",
+	"Underworld Collection",
+	"Resident Evil Collection",
+	"Hellboy Collection",
+	"Superman Collection",
+	"Wonder Woman Collection",
+	"Venom Collection",
+	"Kill Bill Collection",
+	"Lethal Weapon Collection",
+	"Rush Hour Collection",
+	"Beverly Hills Cop Collection",
+	"Paddington Collection",
+	"Trolls Collection",
+	"The Croods Collection",
+	"Annabelle Collection",
+	"Friday the 13th Collection",
+	"Child's Play Collection",
+	"Paranormal Activity Collection",
+	"Evil Dead Collection",
+	"Cloverfield Collection",
+	"The Divergent Series",
+	"Percy Jackson Collection",
+	"Fantastic Beasts Collection",
+	"G.I. Joe Collection",
+	"Tron Collection",
+	"Dragon Ball Collection",
+	"Pokemon Collection",
+	"One Piece Film Collection",
+	"Death Note Collection",
 }
 
 func (h *ContentHandler) tmdbCollectionDetail(ctx context.Context, id int) map[string]any {
@@ -276,102 +312,235 @@ func (h *ContentHandler) SearchTMDBCollections(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, map[string]any{"query": query, "results": valid})
 }
 
+func (h *ContentHandler) resolveCollectionSlot(ctx context.Context, id int, adminMode int) map[string]any {
+	detail := h.tmdbCollectionDetail(ctx, id)
+	if detail == nil || !h.tmdbCollectionVisible(detail, adminMode) {
+		return nil
+	}
+	parts := tmdbCollectionParts(detail)
+	if len(parts) == 0 {
+		return nil
+	}
+	movies := make([]any, 0, len(parts))
+	for _, part := range parts {
+		movies = append(movies, map[string]any{
+			"id":            part["id"],
+			"title":         part["title"],
+			"media_type":    "movie",
+			"poster_path":   part["poster_path"],
+			"backdrop_path": part["backdrop_path"],
+			"release_date":  part["release_date"],
+		})
+	}
+	colName, _ := detail["name"].(string)
+	overview, _ := detail["overview"].(string)
+	banner := ""
+	if b, _ := detail["backdrop_path"].(string); b != "" {
+		banner = "https://image.tmdb.org/t/p/w1280" + b
+	}
+	return map[string]any{
+		"username": "tmdb",
+		"source":   "tmdb",
+		"tmdbId":   id,
+		"collection": map[string]any{
+			"name":        colName,
+			"description": overview,
+			"banner":      banner,
+			"movieCount":  len(movies),
+			"movies":      movies,
+		},
+	}
+}
+
+func (h *ContentHandler) resolveCollectionByName(ctx context.Context, name string, adminMode int) map[string]any {
+	found, err := h.tmdbClient.Get(ctx, "/3/search/collection", map[string]string{
+		"query":         name,
+		"include_adult": "false",
+		"language":      "en-US",
+		"page":          "1",
+	})
+	if err != nil || found == nil {
+		return nil
+	}
+	list, _ := found["results"].([]any)
+	var pick map[string]any
+	for _, entry := range list {
+		item, ok := entry.(map[string]any)
+		if !ok || getFloat(item["id"]) == 0 {
+			continue
+		}
+		if pick == nil {
+			pick = item
+		}
+		if itemName, _ := item["name"].(string); strings.EqualFold(itemName, name) {
+			pick = item
+			break
+		}
+	}
+	if pick == nil {
+		return nil
+	}
+	id := int(getFloat(pick["id"]))
+	return h.resolveCollectionSlot(ctx, id, adminMode)
+}
+
 // GetFeaturedTMDBCollections returns curated TMDB franchises in the same shape as
 // /api/collections/published entries ({username: "tmdb", collection: {...}}), so the
 // Lists page can show them next to user collections.
+// Supports pagination (?page=1&limit=12) with infinite dynamic collection discovery from TMDB!
 func (h *ContentHandler) GetFeaturedTMDBCollections(w http.ResponseWriter, r *http.Request) {
 	adminMode := h.searchAdminMode(r)
-	if v, ok := tmdbFeaturedCache.Load(adminMode); ok {
+	pageStr := strings.TrimSpace(r.URL.Query().Get("page"))
+	limitStr := strings.TrimSpace(r.URL.Query().Get("limit"))
+
+	// Non-paginated request: backward compatibility (loads initial pool of featured franchises)
+	if pageStr == "" && limitStr == "" {
+		cacheKey := fmt.Sprintf("all:%d", adminMode)
+		if v, ok := tmdbFeaturedCache.Load(cacheKey); ok {
+			if entry := v.(tmdbFeaturedCacheEntry); time.Since(entry.at) < tmdbFeaturedTTL {
+				writeJSON(w, http.StatusOK, entry.entries)
+				return
+			}
+		}
+		curatedMax := len(tmdbFeaturedCollectionNames)
+		if curatedMax > 60 {
+			curatedMax = 60
+		}
+		slots := make([]map[string]any, curatedMax)
+		sem := make(chan struct{}, 10)
+		var wg sync.WaitGroup
+		for i := 0; i < curatedMax; i++ {
+			wg.Add(1)
+			go func(idx int, name string) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				slots[idx] = h.resolveCollectionByName(r.Context(), name, adminMode)
+			}(i, tmdbFeaturedCollectionNames[i])
+		}
+		wg.Wait()
+
+		entries := make([]map[string]any, 0, len(slots))
+		for _, slot := range slots {
+			if slot != nil {
+				entries = append(entries, slot)
+			}
+		}
+		if len(entries) > 0 {
+			tmdbFeaturedCache.Store(cacheKey, tmdbFeaturedCacheEntry{entries: entries, at: time.Now()})
+		}
+		writeJSON(w, http.StatusOK, entries)
+		return
+	}
+
+	// Paginated request: infinite scrolling support!
+	page := 1
+	limit := 12
+	if p, err := strconv.Atoi(pageStr); err == nil && p > 0 {
+		page = p
+	}
+	if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 40 {
+		limit = l
+	}
+
+	cacheKey := fmt.Sprintf("p:%d:l:%d:m:%d", page, limit, adminMode)
+	if v, ok := tmdbFeaturedCache.Load(cacheKey); ok {
 		if entry := v.(tmdbFeaturedCacheEntry); time.Since(entry.at) < tmdbFeaturedTTL {
 			writeJSON(w, http.StatusOK, entry.entries)
 			return
 		}
 	}
 
-	slots := make([]map[string]any, len(tmdbFeaturedCollectionNames))
-	sem := make(chan struct{}, 10)
-	var wg sync.WaitGroup
-	for i, name := range tmdbFeaturedCollectionNames {
-		wg.Add(1)
-		go func(idx int, name string) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+	offset := (page - 1) * limit
+	var entries []map[string]any
 
-			found, err := h.tmdbClient.Get(r.Context(), "/3/search/collection", map[string]string{
-				"query":         name,
-				"include_adult": "false",
-				"language":      "en-US",
-				"page":          "1",
-			})
-			if err != nil || found == nil {
-				return
+	if offset < len(tmdbFeaturedCollectionNames) {
+		end := offset + limit
+		if end > len(tmdbFeaturedCollectionNames) {
+			end = len(tmdbFeaturedCollectionNames)
+		}
+		batch := tmdbFeaturedCollectionNames[offset:end]
+		slots := make([]map[string]any, len(batch))
+		sem := make(chan struct{}, 10)
+		var wg sync.WaitGroup
+		for i, name := range batch {
+			wg.Add(1)
+			go func(idx int, name string) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				slots[idx] = h.resolveCollectionByName(r.Context(), name, adminMode)
+			}(i, name)
+		}
+		wg.Wait()
+		for _, slot := range slots {
+			if slot != nil {
+				entries = append(entries, slot)
 			}
-			list, _ := found["results"].([]any)
-			var pick map[string]any
-			for _, entry := range list {
-				item, ok := entry.(map[string]any)
-				if !ok || getFloat(item["id"]) == 0 {
-					continue
-				}
-				if pick == nil {
-					pick = item
-				}
-				if itemName, _ := item["name"].(string); strings.EqualFold(itemName, name) {
-					pick = item
-					break
-				}
-			}
-			if pick == nil {
-				return
-			}
-			id := int(getFloat(pick["id"]))
-			detail := h.tmdbCollectionDetail(r.Context(), id)
-			if detail == nil || !h.tmdbCollectionVisible(detail, adminMode) {
-				return
-			}
-			parts := tmdbCollectionParts(detail)
-			movies := make([]any, 0, len(parts))
-			for _, part := range parts {
-				movies = append(movies, map[string]any{
-					"id":            part["id"],
-					"title":         part["title"],
-					"media_type":    "movie",
-					"poster_path":   part["poster_path"],
-					"backdrop_path": part["backdrop_path"],
-					"release_date":  part["release_date"],
-				})
-			}
-			colName, _ := detail["name"].(string)
-			overview, _ := detail["overview"].(string)
-			banner := ""
-			if b, _ := detail["backdrop_path"].(string); b != "" {
-				banner = "https://image.tmdb.org/t/p/w1280" + b
-			}
-			slots[idx] = map[string]any{
-				"username": "tmdb",
-				"source":   "tmdb",
-				"tmdbId":   id,
-				"collection": map[string]any{
-					"name":        colName,
-					"description": overview,
-					"banner":      banner,
-					"movieCount":  len(movies),
-					"movies":      movies,
-				},
-			}
-		}(i, name)
-	}
-	wg.Wait()
-
-	entries := make([]map[string]any, 0, len(slots))
-	for _, slot := range slots {
-		if slot != nil {
-			entries = append(entries, slot)
 		}
 	}
-	if len(entries) > 0 { // never cache an empty result (TMDB hiccup)
-		tmdbFeaturedCache.Store(adminMode, tmdbFeaturedCacheEntry{entries: entries, at: time.Now()})
+
+	// If offset reached end of curated list OR not enough entries returned, discover dynamically from TMDB
+	if len(entries) < limit {
+		curatedPages := (len(tmdbFeaturedCollectionNames) + limit - 1) / limit
+		discoverPage := 1
+		if page > curatedPages {
+			discoverPage = page - curatedPages + 1
+		}
+		searchQueries := []string{"Collection", "Trilogy", "Saga", "Chronicles"}
+		queryIdx := (discoverPage - 1) % len(searchQueries)
+		tmdbApiPage := ((discoverPage - 1) / len(searchQueries)) + 1
+
+		found, err := h.tmdbClient.Get(r.Context(), "/3/search/collection", map[string]string{
+			"query":         searchQueries[queryIdx],
+			"include_adult": "false",
+			"language":      "en-US",
+			"page":          strconv.Itoa(tmdbApiPage),
+		})
+		if err == nil && found != nil {
+			list, _ := found["results"].([]any)
+			sem := make(chan struct{}, 8)
+			var wg sync.WaitGroup
+			discoveredSlots := make([]map[string]any, len(list))
+			for i, entry := range list {
+				wg.Add(1)
+				go func(idx int, raw any) {
+					defer wg.Done()
+					sem <- struct{}{}
+					defer func() { <-sem }()
+					item, ok := raw.(map[string]any)
+					if !ok || getFloat(item["id"]) == 0 {
+						return
+					}
+					id := int(getFloat(item["id"]))
+					discoveredSlots[idx] = h.resolveCollectionSlot(r.Context(), id, adminMode)
+				}(i, entry)
+			}
+			wg.Wait()
+
+			seenIds := make(map[int]bool)
+			for _, e := range entries {
+				if id, ok := e["tmdbId"].(int); ok {
+					seenIds[id] = true
+				}
+			}
+			for _, slot := range discoveredSlots {
+				if slot != nil {
+					id, _ := slot["tmdbId"].(int)
+					if !seenIds[id] {
+						seenIds[id] = true
+						entries = append(entries, slot)
+						if len(entries) >= limit {
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if len(entries) > 0 {
+		tmdbFeaturedCache.Store(cacheKey, tmdbFeaturedCacheEntry{entries: entries, at: time.Now()})
 	}
 	writeJSON(w, http.StatusOK, entries)
 }

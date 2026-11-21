@@ -593,6 +593,33 @@ func (h *CollectionHandler) GetPublicCollection(w http.ResponseWriter, r *http.R
 	username := chi.URLParam(r, "username")
 	collectionName := chi.URLParam(r, "collectionName")
 
+	if strings.EqualFold(username, "letterboxd") {
+		if col := FindLetterboxdCollection(collectionName); col != nil {
+			cMap, _ := col["collection"].(map[string]any)
+			movies, _ := cMap["movies"].([]any)
+			if movies == nil {
+				if mList, ok := cMap["movies"].([]map[string]any); ok {
+					for _, m := range mList {
+						movies = append(movies, m)
+					}
+				}
+			}
+			writeJSON(w, http.StatusOK, []map[string]any{{
+				"_id":         col["slug"],
+				"name":        cMap["name"],
+				"isDeletable": false,
+				"isPublic":    true,
+				"isPublished": true,
+				"description": cMap["description"],
+				"banner":      collectionResponseBanner(fmt.Sprint(cMap["banner"])),
+				"movieCount":  len(movies),
+				"movies":      movies,
+				"source":      "letterboxd",
+			}})
+			return
+		}
+	}
+
 	col, err := h.svc.GetPublicCollection(r.Context(), username, collectionName)
 	if err != nil && h.isAdminRequest(r) {
 		if adminReader, ok := h.svc.(interface {
