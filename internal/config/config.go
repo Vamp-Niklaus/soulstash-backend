@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -21,6 +22,7 @@ type Config struct {
 	TMDBBearerToken       string
 	TMDBBaseURL           string
 	OMDBAPIKey            string
+	OMDBAPIKeys           []string
 	WatchmodeAPIKey       string
 	CFClearance           string
 	PlaywrightBrowserPath string
@@ -46,6 +48,12 @@ func Load() (*Config, error) {
 	// Normalize hostname as in Node: replace api.themoviedb.org with api.tmdb.org
 	tmdbBaseURL = strings.ReplaceAll(tmdbBaseURL, "api.themoviedb.org", "api.tmdb.org")
 
+	omdbKeys := getOMDBAPIKeys()
+	firstOMDBKey := ""
+	if len(omdbKeys) > 0 {
+		firstOMDBKey = omdbKeys[0]
+	}
+
 	cfg := &Config{
 		Port:                  port,
 		AppEnv:                appEnv,
@@ -55,7 +63,8 @@ func Load() (*Config, error) {
 		BrevoAPIKey:           getEnv("BREVO_API_KEY", ""),
 		TMDBBearerToken:       getEnv("TMDB_BEARER_TOKEN", ""),
 		TMDBBaseURL:           tmdbBaseURL,
-		OMDBAPIKey:            getEnv("OMDB_API_KEY", ""),
+		OMDBAPIKey:            firstOMDBKey,
+		OMDBAPIKeys:           omdbKeys,
 		WatchmodeAPIKey:       getEnv("WATCHMODE_API_KEY", getEnv("WATCHMODE", "")),
 		CFClearance:           getEnv("CF_CLEARANCE", ""),
 		PlaywrightBrowserPath: getEnv("PLAYWRIGHT_BROWSERS_PATH", "default"),
@@ -93,4 +102,60 @@ func getEnv(key, defaultVal string) string {
 		return strings.TrimSpace(val)
 	}
 	return defaultVal
+}
+
+// getOMDBAPIKeys discovers all configured OMDb API keys from environment variables.
+// It supports:
+//   - OMDB_API_KEYS (comma-separated list)
+//   - OMDB_API_KEY (single or comma-separated list)
+//   - OMDB_API_KEY1, OMDB_API_KEY2, OMDB_API_KEY_1, etc. (numbered/prefixed variables)
+func getOMDBAPIKeys() []string {
+	var keys []string
+	seen := make(map[string]bool)
+
+	addKey := func(k string) {
+		k = strings.TrimSpace(k)
+		if k != "" && !seen[k] {
+			seen[k] = true
+			keys = append(keys, k)
+		}
+	}
+
+	// 1. Check comma-separated OMDB_API_KEYS
+	if envKeys := os.Getenv("OMDB_API_KEYS"); envKeys != "" {
+		for _, part := range strings.Split(envKeys, ",") {
+			addKey(part)
+		}
+	}
+
+	// 2. Check standard OMDB_API_KEY (can also be comma-separated)
+	if envKey := os.Getenv("OMDB_API_KEY"); envKey != "" {
+		for _, part := range strings.Split(envKey, ",") {
+			addKey(part)
+		}
+	}
+
+	// 3. Scan all environment variables for keys starting with OMDB_API_KEY (e.g. OMDB_API_KEY1..5)
+	type envPair struct {
+		name string
+		val  string
+	}
+	var omdbEnvPairs []envPair
+	for _, env := range os.Environ() {
+		parts := strings.SplitN(env, "=", 2)
+		if len(parts) == 2 {
+			keyName := strings.ToUpper(strings.TrimSpace(parts[0]))
+			if strings.HasPrefix(keyName, "OMDB_API_KEY") && keyName != "OMDB_API_KEY" && keyName != "OMDB_API_KEYS" {
+				omdbEnvPairs = append(omdbEnvPairs, envPair{name: keyName, val: parts[1]})
+			}
+		}
+	}
+	sort.Slice(omdbEnvPairs, func(i, j int) bool {
+		return omdbEnvPairs[i].name < omdbEnvPairs[j].name
+	})
+	for _, pair := range omdbEnvPairs {
+		addKey(pair.val)
+	}
+
+	return keys
 }

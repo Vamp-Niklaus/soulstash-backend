@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"soulstash/internal/domain"
@@ -29,17 +30,41 @@ type RatingsService interface {
 type ratingsService struct {
 	repo       repository.RatingsRepository
 	tmdbClient tmdb.Client
-	omdbAPIKey string
+	omdbKeys   []string
+	keyIndex   uint64
 	httpClient *http.Client
 }
 
-func NewRatingsService(repo repository.RatingsRepository, tmdbClient tmdb.Client, omdbAPIKey string) RatingsService {
+func NewRatingsService(repo repository.RatingsRepository, tmdbClient tmdb.Client, omdbKeys ...string) RatingsService {
+	var cleanKeys []string
+	seen := make(map[string]bool)
+	for _, k := range omdbKeys {
+		for _, part := range strings.Split(k, ",") {
+			trimmed := strings.TrimSpace(part)
+			if trimmed != "" && !seen[trimmed] {
+				seen[trimmed] = true
+				cleanKeys = append(cleanKeys, trimmed)
+			}
+		}
+	}
+
 	return &ratingsService{
 		repo:       repo,
 		tmdbClient: tmdbClient,
-		omdbAPIKey: omdbAPIKey,
+		omdbKeys:   cleanKeys,
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}
+}
+
+func (s *ratingsService) getNextOMDBKey() string {
+	if len(s.omdbKeys) == 0 {
+		return ""
+	}
+	if len(s.omdbKeys) == 1 {
+		return s.omdbKeys[0]
+	}
+	idx := atomic.AddUint64(&s.keyIndex, 1) - 1
+	return s.omdbKeys[idx%uint64(len(s.omdbKeys))]
 }
 
 func (s *ratingsService) ResolveRating(ctx context.Context, tmdbID int, mediaType string, seedImdbID string, seedVoteAvg *float64) (*domain.RatingRecord, error) {
@@ -101,7 +126,7 @@ func (s *ratingsService) ResolveRating(ctx context.Context, tmdbID int, mediaTyp
 
 	// 3. Query OMDb if IMDb ID found
 	var imdbRating *float64
-	if imdbID != "" && s.omdbAPIKey != "" {
+	if imdbID != "" && len(s.omdbKeys) > 0 {
 		_ = s.repo.IncrementMetric(ctx, "omdbFetchCount")
 		rating, err := s.fetchOmdbRating(ctx, imdbID)
 		if err == nil && rating != nil {
@@ -208,36 +233,66 @@ func (s *ratingsService) GetStoredRating(ctx context.Context, tmdbID int, mediaT
 }
 
 func (s *ratingsService) fetchOmdbRating(ctx context.Context, imdbID string) (*float64, error) {
-	omdbURL := fmt.Sprintf("https://www.omdbapi.com/?i=%s&apikey=%s", url.QueryEscape(imdbID), url.QueryEscape(s.omdbAPIKey))
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, omdbURL, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	var payload struct {
-		Response   string `json:"Response"`
-		ImdbRating string `json:"imdbRating"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return nil, err
-	}
-
-	if payload.Response != "True" || payload.ImdbRating == "N/A" || payload.ImdbRating == "" {
+	if len(s.omdbKeys) == 0 {
 		return nil, nil
 	}
 
-	val, err := strconv.ParseFloat(payload.ImdbRating, 64)
-	if err != nil || val <= 0 || val == InvalidImdbSentinel {
-		return nil, nil
+	maxAttempts := len(s.omdbKeys)
+	if maxAttempts > 3 {
+		maxAttempts = 3
 	}
 
-	return &val, nil
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		apiKey := s.getNextOMDBKey()
+		if apiKey == "" {
+			return nil, nil
+		}
+
+		omdbURL := fmt.Sprintf("https://www.omdbapi.com/?i=%s&apikey=%s", url.QueryEscape(imdbID), url.QueryEscape(apiKey))
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, omdbURL, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		resp, err := s.httpClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+
+		var payload struct {
+			Response   string `json:"Response"`
+			Error      string `json:"Error"`
+			ImdbRating string `json:"imdbRating"`
+		}
+		decodeErr := json.NewDecoder(resp.Body).Decode(&payload)
+		resp.Body.Close()
+
+		if decodeErr != nil {
+			return nil, decodeErr
+		}
+
+		if payload.Response != "True" {
+			errLower := strings.ToLower(payload.Error)
+			// If key reached its daily limit or was invalid, try next key in the pool
+			if strings.Contains(errLower, "limit") || strings.Contains(errLower, "key") {
+				continue
+			}
+			return nil, nil
+		}
+
+		if payload.ImdbRating == "N/A" || payload.ImdbRating == "" {
+			return nil, nil
+		}
+
+		val, err := strconv.ParseFloat(payload.ImdbRating, 64)
+		if err != nil || val <= 0 || val == InvalidImdbSentinel {
+			return nil, nil
+		}
+
+		return &val, nil
+	}
+
+	return nil, nil
 }
 
 func filterImdbSentinel(val *float64) *float64 {

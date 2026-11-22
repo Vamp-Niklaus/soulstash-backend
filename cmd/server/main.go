@@ -92,7 +92,12 @@ func main() {
 	}
 	authSvc := service.NewAuthService(userRepo, brevoClient, cfg.JWTSecret)
 	collectionSvc := service.NewCollectionService(collectionRepo)
-	ratingsSvc := service.NewRatingsService(ratingsRepo, tmdbClient, cfg.OMDBAPIKey)
+	ratingsSvc := service.NewRatingsService(ratingsRepo, tmdbClient, cfg.OMDBAPIKeys...)
+	if len(cfg.OMDBAPIKeys) > 0 {
+		logger.Info("Ratings service initialized with OMDb key pool", "keyCount", len(cfg.OMDBAPIKeys))
+	} else {
+		logger.Info("Ratings service initialized (no OMDb keys configured, using TMDB fallback)")
+	}
 
 	// Handlers
 	authHandler := handler.NewAuthHandler(authSvc, cfg.JWTSecret)

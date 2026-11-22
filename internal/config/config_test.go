@@ -66,3 +66,18 @@ func TestConfigProductionJWTSecretCheck(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "JWT_SECRET must be configured with a secure key")
 }
+
+func TestConfigMultipleOMDBKeys(t *testing.T) {
+	t.Setenv("MONGODB_URI", "mongodb://localhost:27017")
+	t.Setenv("MONGODB_DB_NAME", "test")
+	t.Setenv("OMDB_API_KEY1", "key1")
+	t.Setenv("OMDB_API_KEY2", "key2")
+	t.Setenv("OMDB_API_KEY3", "key3")
+	t.Setenv("OMDB_API_KEY4", "key4")
+	t.Setenv("OMDB_API_KEY5", "key5")
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	assert.Equal(t, "key1", cfg.OMDBAPIKey)
+	assert.Equal(t, []string{"key1", "key2", "key3", "key4", "key5"}, cfg.OMDBAPIKeys)
+}

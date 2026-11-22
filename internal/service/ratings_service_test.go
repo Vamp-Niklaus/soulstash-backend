@@ -140,3 +140,21 @@ func TestRatingsService_BatchEnrich(t *testing.T) {
 		t.Fatalf("expected 2 enriched items, got %d", len(enriched))
 	}
 }
+
+func TestRatingsService_RoundRobinKeys(t *testing.T) {
+	repo := newMockRatingsRepo()
+	keys := []string{"keyA", "keyB", "keyC"}
+	svc := NewRatingsService(repo, nil, keys...).(*ratingsService)
+
+	if len(svc.omdbKeys) != 3 {
+		t.Fatalf("expected 3 keys, got %d", len(svc.omdbKeys))
+	}
+
+	expected := []string{"keyA", "keyB", "keyC", "keyA", "keyB", "keyC"}
+	for i, exp := range expected {
+		k := svc.getNextOMDBKey()
+		if k != exp {
+			t.Errorf("iteration %d: expected key %s, got %s", i, exp, k)
+		}
+	}
+}
