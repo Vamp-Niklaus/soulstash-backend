@@ -350,3 +350,77 @@ func TestContentHandler_DiscoverFiltersAnimeUsingMovieProductionCountries(t *tes
 		t.Fatalf("expected only non-Japanese animation after filtering, got %#v", results)
 	}
 }
+
+func TestContentHandler_GetSimilarContent_PaginationAndTermination(t *testing.T) {
+	mockTMDB := &mockTMDBClient{
+		getFunc: func(ctx context.Context, endpoint string, params map[string]string) (map[string]any, error) {
+			if strings.HasPrefix(endpoint, "/3/tv/313298/similar") {
+				page := params["page"]
+				if page == "4" {
+					return map[string]any{
+						"page":        float64(4),
+						"total_pages": float64(10),
+						"results": []any{
+							map[string]any{"id": float64(134667), "name": "Reincarnated as a Sword", "poster_path": "/sword.jpg", "adult": false, "vote_count": float64(97)},
+							map[string]any{"id": float64(11710), "name": "Dinosaur Planet", "poster_path": "/planet.jpg", "adult": false, "vote_count": float64(38)},
+						},
+					}, nil
+				}
+				if page == "5" {
+					return map[string]any{
+						"page":        float64(5),
+						"total_pages": float64(10),
+						"results": []any{
+							map[string]any{"id": float64(120140), "name": "Elliott from Earth", "poster_path": "/elliott.jpg", "adult": false, "vote_count": float64(56)},
+						},
+					}, nil
+				}
+				// Page 10 is empty (exhausted)
+				return map[string]any{
+					"page":        float64(10),
+					"total_pages": float64(10),
+					"results":     []any{},
+				}, nil
+			}
+			return map[string]any{"id": float64(313298), "name": "Parent Show", "adult": false}, nil
+		},
+	}
+
+	h := handler.NewContentHandler(mockTMDB, &mockRatingsService{}, service.NewAdultDecisionEngine(), nil, "testsecret")
+	r := chi.NewRouter()
+	r.Get("/series/{id}/similar", h.GetSimilarSeries)
+
+	// Test page 4: only page 4 items, has_more is true
+	req4 := httptest.NewRequest(http.MethodGet, "/series/313298/similar?page=4", nil)
+	w4 := httptest.NewRecorder()
+	r.ServeHTTP(w4, req4)
+	if w4.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w4.Code)
+	}
+	var res4 map[string]any
+	json.Unmarshal(w4.Body.Bytes(), &res4)
+	items4 := res4["results"].([]any)
+	if len(items4) != 2 {
+		t.Fatalf("expected 2 items for page 4 without scanning future pages, got %d", len(items4))
+	}
+	if res4["has_more"] != true || res4["hasMore"] != true {
+		t.Fatalf("expected has_more=true on page 4, got %v", res4["has_more"])
+	}
+
+	// Test page 10: empty results signals termination (has_more=false, total_pages clamped)
+	req10 := httptest.NewRequest(http.MethodGet, "/series/313298/similar?page=10", nil)
+	w10 := httptest.NewRecorder()
+	r.ServeHTTP(w10, req10)
+	var res10 map[string]any
+	json.Unmarshal(w10.Body.Bytes(), &res10)
+	items10 := res10["results"].([]any)
+	if len(items10) != 0 {
+		t.Fatalf("expected 0 items for empty page 10, got %d", len(items10))
+	}
+	if res10["has_more"] != false || res10["hasMore"] != false {
+		t.Fatalf("expected has_more=false on empty page 10, got %v", res10["has_more"])
+	}
+	if res10["total_pages"].(float64) > 9 {
+		t.Fatalf("expected total_pages clamped to 9 or less, got %v", res10["total_pages"])
+	}
+}

@@ -167,54 +167,54 @@ func (h *ContentHandler) getSimilarContent(w http.ResponseWriter, r *http.Reques
 	if mediaType == "tv" {
 		baseEndpoint = fmt.Sprintf("/3/tv/%s/similar", id)
 	}
-	var firstPage map[string]any
-	filtered := make([]any, 0, 10)
-	seen := make(map[string]struct{})
-	for currentPage := page; len(filtered) < 10 && currentPage <= page+4; currentPage++ {
-		data, err := h.tmdbClient.Get(r.Context(), baseEndpoint, map[string]string{
-			"page": strconv.Itoa(currentPage), "language": "en-US",
-		})
-		if err != nil || data == nil {
-			if firstPage == nil {
-				writeJSON(w, http.StatusOK, emptySimilarResponse(page))
-				return
-			}
-			break
-		}
-		if firstPage == nil {
-			firstPage = data
-		}
-		results, _ := data["results"].([]any)
-		for _, raw := range results {
-			item, ok := raw.(map[string]any)
-			if !ok || getFloat(item["id"]) == 0 || !searchItemVisible(item, adminMode, h.adultEngine) {
-				continue
-			}
-			itemID := fmt.Sprint(item["id"])
-			if itemID == id {
-				continue
-			}
-			if _, exists := seen[itemID]; exists {
-				continue
-			}
-			seen[itemID] = struct{}{}
-			filtered = append(filtered, item)
-		}
-		if currentPage >= int(getFloat(data["total_pages"])) {
-			break
-		}
-	}
-	if firstPage == nil {
+
+	data, err := h.tmdbClient.Get(r.Context(), baseEndpoint, map[string]string{
+		"page": strconv.Itoa(page), "language": "en-US",
+	})
+	if err != nil || data == nil {
 		writeJSON(w, http.StatusOK, emptySimilarResponse(page))
 		return
 	}
-	firstPage["results"] = filtered
-	firstPage["page"] = page
-	writeJSON(w, http.StatusOK, firstPage)
+
+	results, _ := data["results"].([]any)
+	filtered := make([]any, 0, len(results))
+	seen := make(map[string]struct{})
+	for _, raw := range results {
+		item, ok := raw.(map[string]any)
+		if !ok || getFloat(item["id"]) == 0 || !searchItemVisible(item, adminMode, h.adultEngine) {
+			continue
+		}
+		itemID := fmt.Sprint(item["id"])
+		if itemID == id {
+			continue
+		}
+		if _, exists := seen[itemID]; exists {
+			continue
+		}
+		seen[itemID] = struct{}{}
+		filtered = append(filtered, item)
+	}
+
+	tmdbTotalPages := int(getFloat(data["total_pages"]))
+	hasMore := len(filtered) > 0 && page < tmdbTotalPages
+
+	if len(filtered) == 0 {
+		data["total_pages"] = max(0, page-1)
+		data["total_results"] = 0
+		hasMore = false
+	} else if !hasMore {
+		data["total_pages"] = page
+	}
+
+	data["results"] = filtered
+	data["page"] = page
+	data["has_more"] = hasMore
+	data["hasMore"] = hasMore
+	writeJSON(w, http.StatusOK, data)
 }
 
 func emptySimilarResponse(page int) map[string]any {
-	return map[string]any{"page": page, "results": []any{}, "total_pages": 0, "total_results": 0}
+	return map[string]any{"page": page, "results": []any{}, "total_pages": 0, "total_results": 0, "has_more": false, "hasMore": false}
 }
 
 func (h *ContentHandler) hasSuppressedCollectionPart(r *http.Request, parent map[string]any, adminMode int) bool {
