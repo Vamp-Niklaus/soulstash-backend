@@ -168,49 +168,93 @@ func (h *ContentHandler) getSimilarContent(w http.ResponseWriter, r *http.Reques
 		baseEndpoint = fmt.Sprintf("/3/tv/%s/similar", id)
 	}
 
-	data, err := h.tmdbClient.Get(r.Context(), baseEndpoint, map[string]string{
-		"page": strconv.Itoa(page), "language": "en-US",
-	})
-	if err != nil || data == nil {
+	type pageResult struct {
+		page int
+		data map[string]any
+		err  error
+	}
+	targetPages := []int{3*page - 2, 3*page - 1, 3*page}
+	resultsCh := make(chan pageResult, len(targetPages))
+	var wg sync.WaitGroup
+	for _, p := range targetPages {
+		pNum := p
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			d, err := h.tmdbClient.Get(r.Context(), baseEndpoint, map[string]string{
+				"page": strconv.Itoa(pNum), "language": "en-US",
+			})
+			resultsCh <- pageResult{page: pNum, data: d, err: err}
+		}()
+	}
+	wg.Wait()
+	close(resultsCh)
+
+	fetchedPages := make(map[int]map[string]any)
+	tmdbTotalPages := 0
+	tmdbTotalResults := 0
+	for res := range resultsCh {
+		if res.err == nil && res.data != nil {
+			fetchedPages[res.page] = res.data
+			if tp := int(getFloat(res.data["total_pages"])); tp > tmdbTotalPages {
+				tmdbTotalPages = tp
+			}
+			if tr := int(getFloat(res.data["total_results"])); tr > tmdbTotalResults {
+				tmdbTotalResults = tr
+			}
+		}
+	}
+
+	if len(fetchedPages) == 0 {
 		writeJSON(w, http.StatusOK, emptySimilarResponse(page))
 		return
 	}
 
-	results, _ := data["results"].([]any)
-	filtered := make([]any, 0, len(results))
+	filtered := make([]any, 0)
 	seen := make(map[string]struct{})
-	for _, raw := range results {
-		item, ok := raw.(map[string]any)
-		if !ok || getFloat(item["id"]) == 0 || !searchItemVisible(item, adminMode, h.adultEngine) {
+	for _, p := range targetPages {
+		data := fetchedPages[p]
+		if data == nil {
 			continue
 		}
-		itemID := fmt.Sprint(item["id"])
-		if itemID == id {
-			continue
+		rawResults, _ := data["results"].([]any)
+		for _, raw := range rawResults {
+			item, ok := raw.(map[string]any)
+			if !ok || getFloat(item["id"]) == 0 || !searchItemVisible(item, adminMode, h.adultEngine) {
+				continue
+			}
+			itemID := fmt.Sprint(item["id"])
+			if itemID == id {
+				continue
+			}
+			if _, exists := seen[itemID]; exists {
+				continue
+			}
+			seen[itemID] = struct{}{}
+			filtered = append(filtered, item)
 		}
-		if _, exists := seen[itemID]; exists {
-			continue
-		}
-		seen[itemID] = struct{}{}
-		filtered = append(filtered, item)
 	}
 
-	tmdbTotalPages := int(getFloat(data["total_pages"]))
-	hasMore := len(filtered) > 0 && page < tmdbTotalPages
+	soulstashTotalPages := (tmdbTotalPages + 2) / 3
+	hasMore := len(filtered) > 0 && page < soulstashTotalPages
 
 	if len(filtered) == 0 {
-		data["total_pages"] = max(0, page-1)
-		data["total_results"] = 0
+		soulstashTotalPages = max(0, page-1)
+		tmdbTotalResults = 0
 		hasMore = false
 	} else if !hasMore {
-		data["total_pages"] = page
+		soulstashTotalPages = page
 	}
 
-	data["results"] = filtered
-	data["page"] = page
-	data["has_more"] = hasMore
-	data["hasMore"] = hasMore
-	writeJSON(w, http.StatusOK, data)
+	resp := map[string]any{
+		"page":          page,
+		"results":       filtered,
+		"total_pages":   soulstashTotalPages,
+		"total_results": tmdbTotalResults,
+		"has_more":      hasMore,
+		"hasMore":       hasMore,
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func emptySimilarResponse(page int) map[string]any {
@@ -404,7 +448,7 @@ func (h *ContentHandler) DiscoverMovies(w http.ResponseWriter, r *http.Request) 
 	if limit > 100 {
 		limit = 100
 	}
-	targetCount := limit
+	targetCount := max(limit, 36)
 	if page == 1 && targetCount < 14 {
 		targetCount = 14
 	}
@@ -423,67 +467,149 @@ func (h *ContentHandler) DiscoverMovies(w http.ResponseWriter, r *http.Request) 
 	}
 	adminMode := h.searchAdminMode(r)
 	includeAdult := strconv.FormatBool(adminMode != 0)
-	items := make([]map[string]any, 0, targetCount)
-	totalPages, totalResults := 1, 0
-	maxPage := page + 6
+
+	const adultKeywords = "190370|207767|256466|302868|281741|738|155477|170827|14794|3182|1326|286925|11034|2804"
+	movieParams := map[string]string{"language": "en-US", "include_adult": includeAdult}
+	tvParams := cloneStringMap(movieParams)
+	movieEndpoint, tvEndpoint := "/3/discover/movie", "/3/discover/tv"
+
+	targetPages := []int{3*page - 2, 3*page - 1, 3*page}
 	if search != "" {
-		maxPage = page
-	}
-	for currentPage := page; len(items) < targetCount && currentPage <= maxPage; currentPage++ {
-		movieParams := map[string]string{"language": "en-US", "page": strconv.Itoa(currentPage), "include_adult": includeAdult}
-		tvParams := cloneStringMap(movieParams)
-		movieEndpoint, tvEndpoint := "/3/discover/movie", "/3/discover/tv"
-		if search != "" {
-			movieEndpoint, tvEndpoint = "/3/search/movie", "/3/search/tv"
-			movieParams["query"], tvParams["query"] = search, search
+		targetPages = []int{page}
+		movieEndpoint, tvEndpoint = "/3/search/movie", "/3/search/tv"
+		movieParams["query"], tvParams["query"] = search, search
+	} else {
+		movieParams["sort_by"], tvParams["sort_by"] = sortBy+"."+sortOrder, sortBy+"."+sortOrder
+		if adminMode != 2 {
+			movieParams["vote_count.gte"], tvParams["vote_count.gte"] = "5", "5"
 		} else {
-			movieParams["sort_by"], tvParams["sort_by"] = sortBy+"."+sortOrder, sortBy+"."+sortOrder
-			if adminMode != 2 {
-				movieParams["vote_count.gte"], tvParams["vote_count.gte"] = "5", "5"
-			}
-			if genreVal != "" {
-				movieGenre, tvGenre := mapGenreForMovie(genreVal), mapGenreForTV(genreVal)
-				if movieGenre == "" {
-					movieGenre = genreVal
-				}
-				if tvGenre == "" {
-					tvGenre = genreVal
-				}
-				movieParams["with_genres"], tvParams["with_genres"] = movieGenre, tvGenre
-			}
-			if year != "" {
-				movieParams["primary_release_year"], tvParams["first_air_date_year"] = year, year
-			}
+			movieParams["with_keywords"] = adultKeywords
+			tvParams["with_keywords"] = adultKeywords
 		}
-		movieData, movieErr := h.tmdbClient.Get(r.Context(), movieEndpoint, movieParams)
-		tvData, tvErr := h.tmdbClient.Get(r.Context(), tvEndpoint, tvParams)
-		if movieErr != nil && tvErr != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to fetch from TMDB")
+		if genreVal != "" {
+			movieGenre, tvGenre := mapGenreForMovie(genreVal), mapGenreForTV(genreVal)
+			if movieGenre == "" {
+				movieGenre = genreVal
+			}
+			if tvGenre == "" {
+				tvGenre = genreVal
+			}
+			movieParams["with_genres"], tvParams["with_genres"] = movieGenre, tvGenre
+		}
+		if year != "" {
+			movieParams["primary_release_year"], tvParams["first_air_date_year"] = year, year
+		}
+	}
+
+	type fetchRes struct {
+		page      int
+		mediaType string
+		data      map[string]any
+		err       error
+	}
+
+	resultsCh := make(chan fetchRes, len(targetPages)*2)
+	var wg sync.WaitGroup
+
+	for _, p := range targetPages {
+		pNum := p
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			mParams := cloneStringMap(movieParams)
+			mParams["page"] = strconv.Itoa(pNum)
+			data, err := h.tmdbClient.Get(r.Context(), movieEndpoint, mParams)
+			resultsCh <- fetchRes{page: pNum, mediaType: "movie", data: data, err: err}
+		}()
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			tParams := cloneStringMap(tvParams)
+			tParams["page"] = strconv.Itoa(pNum)
+			data, err := h.tmdbClient.Get(r.Context(), tvEndpoint, tParams)
+			resultsCh <- fetchRes{page: pNum, mediaType: "tv", data: data, err: err}
+		}()
+	}
+
+	wg.Wait()
+	close(resultsCh)
+
+	moviePageData := make(map[int]map[string]any)
+	tvPageData := make(map[int]map[string]any)
+	tmdbMaxPages := 1
+	tmdbTotalResults := 0
+	hasSuccess := false
+
+	for res := range resultsCh {
+		if res.err == nil && res.data != nil {
+			hasSuccess = true
+			if res.mediaType == "movie" {
+				moviePageData[res.page] = res.data
+			} else {
+				tvPageData[res.page] = res.data
+			}
+			if p := int(getFloat(res.data["total_pages"])); p > tmdbMaxPages {
+				tmdbMaxPages = p
+			}
+			tmdbTotalResults += int(getFloat(res.data["total_results"]))
+		}
+	}
+
+	if !hasSuccess {
+		writeError(w, http.StatusInternalServerError, "Failed to fetch from TMDB")
+		return
+	}
+
+	markAdultDiscoverResults := func(data map[string]any) {
+		if adminMode != 2 || data == nil {
 			return
 		}
-		if movieErr == nil {
-			items = append(items, discoverItems(movieData, "Movie", adminMode, h.adultEngine, false)...)
-			totalPages = max(totalPages, int(getFloat(movieData["total_pages"])))
-			totalResults += int(getFloat(movieData["total_results"]))
+		results, _ := data["results"].([]any)
+		for _, raw := range results {
+			if item, ok := raw.(map[string]any); ok {
+				item["adult"] = true
+				item["_isAdultDiscover"] = true
+			}
 		}
-		if tvErr == nil {
-			items = append(items, discoverItems(tvData, "Series", adminMode, h.adultEngine, false)...)
-			totalPages = max(totalPages, int(getFloat(tvData["total_pages"])))
-			totalResults += int(getFloat(tvData["total_results"]))
-		}
-		items = uniquePopularItems(items)
 	}
+
+	items := make([]map[string]any, 0, targetCount)
+	for _, p := range targetPages {
+		if mD := moviePageData[p]; mD != nil {
+			markAdultDiscoverResults(mD)
+			items = append(items, discoverItems(mD, "Movie", adminMode, h.adultEngine, false)...)
+		}
+		if tD := tvPageData[p]; tD != nil {
+			markAdultDiscoverResults(tD)
+			items = append(items, discoverItems(tD, "Series", adminMode, h.adultEngine, false)...)
+		}
+	}
+
+	items = uniquePopularItems(items)
 	if genreVal != "16" {
 		items = withoutAnimeItems(items)
 	}
 	if len(items) > targetCount {
 		items = items[:targetCount]
 	}
-	pages := max(totalPages, 500)
-	totalResults = max(totalResults, pages*limit)
+
+	var pages int
+	if search != "" {
+		pages = max(tmdbMaxPages, 500)
+	} else {
+		pages = (tmdbMaxPages + 2) / 3
+		if pages < 1 {
+			pages = 1
+		}
+		pages = min(pages, 500)
+	}
+	totalResults := max(tmdbTotalResults, pages*limit)
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"movies":     items,
-		"pagination": map[string]int{"page": page, "limit": limit, "total": totalResults, "pages": pages},
+		"results":    items,
+		"pagination": map[string]int{"page": page, "limit": len(items), "total": totalResults, "pages": pages},
 	})
 }
 
@@ -1006,99 +1132,138 @@ func (h *ContentHandler) GetPopular(w http.ResponseWriter, r *http.Request) {
 	if limit > 100 {
 		limit = 100
 	}
-	targetCount := limit
+	targetCount := max(limit, 36)
 	if page == 1 && targetCount < 14 {
 		targetCount = 14
 	}
 	adminMode := h.searchAdminMode(r)
 	today := time.Now().UTC().Format("2006-01-02")
-	items := make([]map[string]any, 0, targetCount)
+
+	const adultKeywords = "190370|207767|256466|302868|281741|738|155477|170827|14794|3182|1326|286925|11034|2804"
+	movieParams := map[string]string{
+		"language":                 "en-US",
+		"include_adult":            strconv.FormatBool(adminMode == 2),
+		"sort_by":                  "popularity.desc",
+		"primary_release_date.lte": today,
+	}
+	seriesParams := cloneStringMap(movieParams)
+	delete(seriesParams, "primary_release_date.lte")
+	seriesParams["first_air_date.lte"] = today
+
+	if adminMode == 2 {
+		movieParams["with_keywords"] = adultKeywords
+		seriesParams["with_keywords"] = adultKeywords
+	}
+
+	targetPages := []int{3*page - 2, 3*page - 1, 3*page}
+
+	type fetchRes struct {
+		page      int
+		mediaType string
+		data      map[string]any
+		err       error
+	}
+
+	resultsCh := make(chan fetchRes, len(targetPages)*2)
+	var wg sync.WaitGroup
+
+	for _, p := range targetPages {
+		pNum := p
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			mParams := cloneStringMap(movieParams)
+			mParams["page"] = strconv.Itoa(pNum)
+			data, err := h.tmdbClient.Get(r.Context(), "/3/discover/movie", mParams)
+			resultsCh <- fetchRes{page: pNum, mediaType: "movie", data: data, err: err}
+		}()
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sParams := cloneStringMap(seriesParams)
+			sParams["page"] = strconv.Itoa(pNum)
+			data, err := h.tmdbClient.Get(r.Context(), "/3/discover/tv", sParams)
+			resultsCh <- fetchRes{page: pNum, mediaType: "tv", data: data, err: err}
+		}()
+	}
+
+	wg.Wait()
+	close(resultsCh)
+
+	moviePageData := make(map[int]map[string]any)
+	seriesPageData := make(map[int]map[string]any)
 	moviePages, seriesPages := 1, 1
 	movieTotal, seriesTotal := 0, 0
-	currentPage := page
+	hasSuccess := false
 
-	for attempts := 0; len(items) < targetCount && attempts < 5; attempts++ {
-		movieParams := map[string]string{
-			"language":                 "en-US",
-			"page":                     strconv.Itoa(currentPage),
-			"include_adult":            strconv.FormatBool(adminMode == 2),
-			"sort_by":                  "popularity.desc",
-			"primary_release_date.lte": today,
-		}
-		seriesParams := cloneStringMap(movieParams)
-		delete(seriesParams, "primary_release_date.lte")
-		seriesParams["first_air_date.lte"] = today
-
-		var movieData, seriesData map[string]any
-		var movieErr, seriesErr error
-		var wg sync.WaitGroup
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			movieData, movieErr = h.tmdbClient.Get(r.Context(), "/3/discover/movie", movieParams)
-		}()
-		go func() {
-			defer wg.Done()
-			seriesData, seriesErr = h.tmdbClient.Get(r.Context(), "/3/discover/tv", seriesParams)
-		}()
-		wg.Wait()
-
-		if movieErr != nil && seriesErr != nil {
-			if len(items) == 0 {
-				writeError(w, http.StatusBadGateway, "Failed to fetch popular content")
-				return
-			}
-			break
-		}
-
-		markAdultDiscoverResults := func(data map[string]any) {
-			if adminMode != 2 || data == nil {
-				return
-			}
-			results, _ := data["results"].([]any)
-			for _, raw := range results {
-				if item, ok := raw.(map[string]any); ok {
-					item["adult"] = true
-					item["_isAdultDiscover"] = true
+	for res := range resultsCh {
+		if res.err == nil && res.data != nil {
+			hasSuccess = true
+			if res.mediaType == "movie" {
+				moviePageData[res.page] = res.data
+				if p := int(getFloat(res.data["total_pages"])); p > moviePages {
+					moviePages = p
 				}
+				movieTotal += int(getFloat(res.data["total_results"]))
+			} else {
+				seriesPageData[res.page] = res.data
+				if p := int(getFloat(res.data["total_pages"])); p > seriesPages {
+					seriesPages = p
+				}
+				seriesTotal += int(getFloat(res.data["total_results"]))
 			}
 		}
-		markAdultDiscoverResults(movieData)
-		markAdultDiscoverResults(seriesData)
+	}
 
-		pageItems := make([]map[string]any, 0, targetCount)
-		if movieErr == nil {
-			pageItems = append(pageItems, discoverItems(movieData, "Movie", adminMode, h.adultEngine, false)...)
-			moviePages = max(moviePages, int(getFloat(movieData["total_pages"])))
-			movieTotal = max(movieTotal, int(getFloat(movieData["total_results"])))
+	if !hasSuccess {
+		writeError(w, http.StatusBadGateway, "Failed to fetch popular content")
+		return
+	}
+
+	markAdultDiscoverResults := func(data map[string]any) {
+		if adminMode != 2 || data == nil {
+			return
 		}
-		if seriesErr == nil {
-			pageItems = append(pageItems, discoverItems(seriesData, "Series", adminMode, h.adultEngine, false)...)
-			seriesPages = max(seriesPages, int(getFloat(seriesData["total_pages"])))
-			seriesTotal = max(seriesTotal, int(getFloat(seriesData["total_results"])))
+		results, _ := data["results"].([]any)
+		for _, raw := range results {
+			if item, ok := raw.(map[string]any); ok {
+				item["adult"] = true
+				item["_isAdultDiscover"] = true
+			}
+		}
+	}
+
+	items := make([]map[string]any, 0, targetCount)
+	for _, p := range targetPages {
+		pageItems := make([]map[string]any, 0)
+		if mD := moviePageData[p]; mD != nil {
+			markAdultDiscoverResults(mD)
+			pageItems = append(pageItems, discoverItems(mD, "Movie", adminMode, h.adultEngine, false)...)
+		}
+		if sD := seriesPageData[p]; sD != nil {
+			markAdultDiscoverResults(sD)
+			pageItems = append(pageItems, discoverItems(sD, "Series", adminMode, h.adultEngine, false)...)
 		}
 		pageItems = withoutAnimeItems(pageItems)
 		items = uniquePopularItems(append(items, pageItems...))
-
-		movieResults, _ := movieData["results"].([]any)
-		seriesResults, _ := seriesData["results"].([]any)
-		if (currentPage >= max(moviePages, seriesPages)) || (len(movieResults) == 0 && len(seriesResults) == 0) {
-			break
-		}
-		currentPage++
 	}
 
 	if len(items) > targetCount {
 		items = items[:targetCount]
 	}
-	totalPages := max(moviePages, seriesPages)
-	totalResults := movieTotal + seriesTotal
-	safeTotalPages := totalPages
-	if safeTotalPages <= 1 {
-		safeTotalPages = 500
+
+	tmdbMaxPages := max(moviePages, seriesPages)
+	safeTotalPages := (tmdbMaxPages + 2) / 3
+	if safeTotalPages < 1 {
+		safeTotalPages = 1
 	}
-	safeTotalPages = max(safeTotalPages, page+10)
-	totalResults = max(totalResults, safeTotalPages*limit)
+	safeTotalPages = min(safeTotalPages, 500)
+	totalResults := movieTotal + seriesTotal
+	if totalResults < safeTotalPages*limit {
+		totalResults = safeTotalPages * limit
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"movies":        items,
 		"results":       items,
@@ -1106,7 +1271,7 @@ func (h *ContentHandler) GetPopular(w http.ResponseWriter, r *http.Request) {
 		"total_pages":   safeTotalPages,
 		"total_results": totalResults,
 		"pagination": map[string]int{
-			"page": page, "limit": limit, "total": totalResults, "pages": safeTotalPages,
+			"page": page, "limit": len(items), "total": totalResults, "pages": safeTotalPages,
 		},
 	})
 }
@@ -1740,14 +1905,19 @@ func searchItemVisible(item map[string]any, adminMode int, adultEngine *service.
 	if adminMode == 1 {
 		return true
 	}
-	adult := item["adult"] == true
-	if adultEngine != nil {
-		adult = adultEngine.Evaluate(item)
-	}
 	if adminMode == 2 {
-		return adult
+		if item["_isAdultDiscover"] == true || item["adult"] == true {
+			return true
+		}
+		if adultEngine != nil {
+			return adultEngine.HasAdultKeywords(item)
+		}
+		return item["adult"] == true
 	}
-	return !adult
+	if adultEngine != nil {
+		return !adultEngine.Evaluate(item)
+	}
+	return item["adult"] != true
 }
 
 func (h *ContentHandler) filterContentResults(payload map[string]any, adminMode int) {

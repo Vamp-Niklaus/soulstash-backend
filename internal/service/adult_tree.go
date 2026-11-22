@@ -157,6 +157,36 @@ func (e *AdultDecisionEngine) Evaluate(item map[string]any) bool {
 	return e.traverse(e.tree, item, nil)
 }
 
+func (e *AdultDecisionEngine) HasAdultKeywords(item map[string]any) bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.keywordRegex == nil {
+		return false
+	}
+	title, _ := item["title"].(string)
+	if title == "" {
+		title, _ = item["name"].(string)
+	}
+	overview, _ := item["overview"].(string)
+	if e.keywordRegex.MatchString(title) || e.keywordRegex.MatchString(overview) {
+		return true
+	}
+	if genres, ok := item["genres"].([]any); ok {
+		for _, g := range genres {
+			name := ""
+			if gStr, ok := g.(string); ok {
+				name = gStr
+			} else if gMap, ok := g.(map[string]any); ok {
+				name, _ = gMap["name"].(string)
+			}
+			if e.keywordRegex.MatchString(name) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (e *AdultDecisionEngine) Test(tree *TreeNode, item map[string]any) (bool, []TraceStep) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()

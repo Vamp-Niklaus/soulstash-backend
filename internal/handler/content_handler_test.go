@@ -359,7 +359,7 @@ func TestContentHandler_GetSimilarContent_PaginationAndTermination(t *testing.T)
 				if page == "4" {
 					return map[string]any{
 						"page":        float64(4),
-						"total_pages": float64(10),
+						"total_pages": float64(15),
 						"results": []any{
 							map[string]any{"id": float64(134667), "name": "Reincarnated as a Sword", "poster_path": "/sword.jpg", "adult": false, "vote_count": float64(97)},
 							map[string]any{"id": float64(11710), "name": "Dinosaur Planet", "poster_path": "/planet.jpg", "adult": false, "vote_count": float64(38)},
@@ -369,16 +369,23 @@ func TestContentHandler_GetSimilarContent_PaginationAndTermination(t *testing.T)
 				if page == "5" {
 					return map[string]any{
 						"page":        float64(5),
-						"total_pages": float64(10),
+						"total_pages": float64(15),
 						"results": []any{
 							map[string]any{"id": float64(120140), "name": "Elliott from Earth", "poster_path": "/elliott.jpg", "adult": false, "vote_count": float64(56)},
 						},
 					}, nil
 				}
-				// Page 10 is empty (exhausted)
+				if page == "6" {
+					return map[string]any{
+						"page":        float64(6),
+						"total_pages": float64(15),
+						"results":     []any{},
+					}, nil
+				}
+				// Pages beyond 6 are empty (exhausted)
 				return map[string]any{
 					"page":        float64(10),
-					"total_pages": float64(10),
+					"total_pages": float64(15),
 					"results":     []any{},
 				}, nil
 			}
@@ -390,37 +397,37 @@ func TestContentHandler_GetSimilarContent_PaginationAndTermination(t *testing.T)
 	r := chi.NewRouter()
 	r.Get("/series/{id}/similar", h.GetSimilarSeries)
 
-	// Test page 4: only page 4 items, has_more is true
-	req4 := httptest.NewRequest(http.MethodGet, "/series/313298/similar?page=4", nil)
-	w4 := httptest.NewRecorder()
-	r.ServeHTTP(w4, req4)
-	if w4.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w4.Code)
+	// Test page 2 (fetches TMDB pages 4, 5, 6): merges page 4 (2 items) + page 5 (1 item) = 3 items, has_more is true
+	req2 := httptest.NewRequest(http.MethodGet, "/series/313298/similar?page=2", nil)
+	w2 := httptest.NewRecorder()
+	r.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w2.Code)
 	}
-	var res4 map[string]any
-	json.Unmarshal(w4.Body.Bytes(), &res4)
-	items4 := res4["results"].([]any)
-	if len(items4) != 2 {
-		t.Fatalf("expected 2 items for page 4 without scanning future pages, got %d", len(items4))
+	var res2 map[string]any
+	json.Unmarshal(w2.Body.Bytes(), &res2)
+	items2 := res2["results"].([]any)
+	if len(items2) != 3 {
+		t.Fatalf("expected 3 items for page 2 (merged from TMDB pages 4, 5, 6), got %d", len(items2))
 	}
-	if res4["has_more"] != true || res4["hasMore"] != true {
-		t.Fatalf("expected has_more=true on page 4, got %v", res4["has_more"])
+	if res2["has_more"] != true || res2["hasMore"] != true {
+		t.Fatalf("expected has_more=true on page 2, got %v", res2["has_more"])
 	}
 
-	// Test page 10: empty results signals termination (has_more=false, total_pages clamped)
-	req10 := httptest.NewRequest(http.MethodGet, "/series/313298/similar?page=10", nil)
-	w10 := httptest.NewRecorder()
-	r.ServeHTTP(w10, req10)
-	var res10 map[string]any
-	json.Unmarshal(w10.Body.Bytes(), &res10)
-	items10 := res10["results"].([]any)
-	if len(items10) != 0 {
-		t.Fatalf("expected 0 items for empty page 10, got %d", len(items10))
+	// Test page 6 (fetches TMDB pages 16, 17, 18): empty results signals termination (has_more=false, total_pages clamped)
+	req6 := httptest.NewRequest(http.MethodGet, "/series/313298/similar?page=6", nil)
+	w6 := httptest.NewRecorder()
+	r.ServeHTTP(w6, req6)
+	var res6 map[string]any
+	json.Unmarshal(w6.Body.Bytes(), &res6)
+	items6 := res6["results"].([]any)
+	if len(items6) != 0 {
+		t.Fatalf("expected 0 items for empty page 6, got %d", len(items6))
 	}
-	if res10["has_more"] != false || res10["hasMore"] != false {
-		t.Fatalf("expected has_more=false on empty page 10, got %v", res10["has_more"])
+	if res6["has_more"] != false || res6["hasMore"] != false {
+		t.Fatalf("expected has_more=false on empty page 6, got %v", res6["has_more"])
 	}
-	if res10["total_pages"].(float64) > 9 {
-		t.Fatalf("expected total_pages clamped to 9 or less, got %v", res10["total_pages"])
+	if res6["total_pages"].(float64) > 5 {
+		t.Fatalf("expected total_pages clamped to 5 or less, got %v", res6["total_pages"])
 	}
 }
