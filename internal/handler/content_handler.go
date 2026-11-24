@@ -611,13 +611,20 @@ func (h *ContentHandler) DiscoverMovies(w http.ResponseWriter, r *http.Request) 
 		lastTmdbPage = 3 * page
 	} else {
 		curPage := clientTmdbPage
-		firstBatch := []int{curPage, curPage + 1}
+		initialBatchSize := 2
+		if adminMode == 2 {
+			initialBatchSize = 4
+		}
+		firstBatch := make([]int, 0, initialBatchSize)
+		for b := 0; b < initialBatchSize; b++ {
+			firstBatch = append(firstBatch, curPage+b)
+		}
 		mPages, tPages, maxP, totalR, ok := fetchBatch(firstBatch)
 		hasSuccess = ok
 		tmdbMaxPages = maxP
 		tmdbTotalResults = totalR
-		lastTmdbPage = curPage + 1
-		pagesFetched := 2
+		lastTmdbPage = firstBatch[len(firstBatch)-1]
+		pagesFetched := len(firstBatch)
 
 		items = append(items, extractItemsFromPages(mPages, tPages, firstBatch)...)
 		items = uniquePopularItems(items)
@@ -630,11 +637,20 @@ func (h *ContentHandler) DiscoverMovies(w http.ResponseWriter, r *http.Request) 
 			if len(items) < 18 {
 				maxPages = 10
 			}
+			if adminMode == 2 {
+				maxPages = 20
+				if len(items) < 18 {
+					maxPages = 50
+				}
+			}
 			if pagesFetched >= maxPages {
 				break
 			}
 
 			batchSize := 2
+			if adminMode == 2 {
+				batchSize = 4
+			}
 			if pagesFetched+batchSize > maxPages {
 				batchSize = maxPages - pagesFetched
 			}
@@ -658,13 +674,15 @@ func (h *ContentHandler) DiscoverMovies(w http.ResponseWriter, r *http.Request) 
 			lastTmdbPage = nextBatch[len(nextBatch)-1]
 
 			newItems := extractItemsFromPages(mP, tP, nextBatch)
-			if len(newItems) == 0 && tr == 0 {
+			if len(newItems) == 0 && tr == 0 && lastTmdbPage >= tmdbMaxPages {
 				break
 			}
-			items = append(items, newItems...)
-			items = uniquePopularItems(items)
-			if genreVal != "16" {
-				items = withoutAnimeItems(items)
+			if len(newItems) > 0 {
+				items = append(items, newItems...)
+				items = uniquePopularItems(items)
+				if genreVal != "16" {
+					items = withoutAnimeItems(items)
+				}
 			}
 		}
 	}
@@ -699,6 +717,7 @@ func (h *ContentHandler) DiscoverMovies(w http.ResponseWriter, r *http.Request) 
 	}
 
 	nextTmdbPage := lastTmdbPage + 1
+	hasMore := lastTmdbPage < tmdbMaxPages
 	writeJSON(w, http.StatusOK, map[string]any{
 		"movies":  items,
 		"results": items,
@@ -708,6 +727,7 @@ func (h *ContentHandler) DiscoverMovies(w http.ResponseWriter, r *http.Request) 
 			"total":          totalResults,
 			"pages":          pages,
 			"next_tmdb_page": nextTmdbPage,
+			"has_more":       hasMore,
 		},
 	})
 }
@@ -1658,14 +1678,91 @@ func (h *ContentHandler) GetGenres(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *ContentHandler) GetHome(w http.ResponseWriter, r *http.Request) {
-	trending, _ := h.tmdbClient.Get(r.Context(), "/3/trending/all/day", nil)
-	popularMovies, _ := h.tmdbClient.Get(r.Context(), "/3/movie/popular", nil)
-	popularSeries, _ := h.tmdbClient.Get(r.Context(), "/3/tv/popular", nil)
-
 	adminMode := h.searchAdminMode(r)
+
+	type fetchRes struct {
+		name string
+		data map[string]any
+		err  error
+	}
+
+	var wg sync.WaitGroup
+	ch := make(chan fetchRes, 4)
+
+	// Fetch 2 pages of trending in parallel so there are at least 30-40 items before filtering (guaranteeing >= 14 items)
+	wg.Add(4)
+	go func() {
+		defer wg.Done()
+		d, err := h.tmdbClient.Get(r.Context(), "/3/trending/all/day", map[string]string{"page": "1"})
+		ch <- fetchRes{name: "trending1", data: d, err: err}
+	}()
+	go func() {
+		defer wg.Done()
+		d, err := h.tmdbClient.Get(r.Context(), "/3/trending/all/day", map[string]string{"page": "2"})
+		ch <- fetchRes{name: "trending2", data: d, err: err}
+	}()
+	go func() {
+		defer wg.Done()
+		d, err := h.tmdbClient.Get(r.Context(), "/3/movie/popular", nil)
+		ch <- fetchRes{name: "popularMovies", data: d, err: err}
+	}()
+	go func() {
+		defer wg.Done()
+		d, err := h.tmdbClient.Get(r.Context(), "/3/tv/popular", nil)
+		ch <- fetchRes{name: "popularSeries", data: d, err: err}
+	}()
+	wg.Wait()
+	close(ch)
+
+	var trending, popularMovies, popularSeries map[string]any
+	var trendingResults []any
+
+	for res := range ch {
+		if res.err != nil || res.data == nil {
+			continue
+		}
+		switch res.name {
+		case "trending1":
+			trending = res.data
+			if r1, ok := res.data["results"].([]any); ok {
+				trendingResults = append(trendingResults, r1...)
+			}
+		case "trending2":
+			if r2, ok := res.data["results"].([]any); ok {
+				trendingResults = append(trendingResults, r2...)
+			}
+		case "popularMovies":
+			popularMovies = res.data
+		case "popularSeries":
+			popularSeries = res.data
+		}
+	}
+
+	if trending == nil {
+		trending = map[string]any{"results": []any{}}
+	}
+	trending["results"] = trendingResults
+
 	h.filterContentResults(trending, adminMode)
 	h.filterContentResults(popularMovies, adminMode)
 	h.filterContentResults(popularSeries, adminMode)
+
+	if h.ratingsSvc != nil {
+		if results, ok := trending["results"].([]any); ok {
+			trending["results"] = enrichSliceOfMaps(r.Context(), h.ratingsSvc, results)
+		}
+		if popularMovies != nil {
+			if results, ok := popularMovies["results"].([]any); ok {
+				popularMovies["results"] = enrichSliceOfMaps(r.Context(), h.ratingsSvc, results)
+			}
+		}
+		if popularSeries != nil {
+			if results, ok := popularSeries["results"].([]any); ok {
+				popularSeries["results"] = enrichSliceOfMaps(r.Context(), h.ratingsSvc, results)
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"trending":      trending,
 		"popularMovies": popularMovies,
