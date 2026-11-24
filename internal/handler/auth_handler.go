@@ -48,6 +48,9 @@ func (h *AuthHandler) RegisterRoutes(r chi.Router) {
 		protected.Get("/me", h.GetMe)
 		protected.Get("/profile", h.GetProfile)
 		protected.Post("/update-profile", h.UpdateProfile)
+		protected.Get("/watch-progress", h.GetWatchProgress)
+		protected.Post("/watch-progress", h.SaveWatchProgress)
+		protected.Delete("/watch-progress/{key}", h.DeleteWatchProgress)
 	})
 }
 
@@ -248,6 +251,48 @@ func (h *AuthHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, user)
+}
+
+func (h *AuthHandler) GetWatchProgress(w http.ResponseWriter, r *http.Request) {
+	user := middleware.GetUserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "Access token required")
+		return
+	}
+	progress, err := h.authService.GetWatchProgress(r.Context(), user.UserID)
+	if err != nil || progress == nil {
+		writeJSON(w, http.StatusOK, []any{})
+		return
+	}
+	writeJSON(w, http.StatusOK, progress)
+}
+
+func (h *AuthHandler) SaveWatchProgress(w http.ResponseWriter, r *http.Request) {
+	user := middleware.GetUserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "Access token required")
+		return
+	}
+	var item map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	_ = h.authService.SaveWatchProgress(r.Context(), user.UserID, item)
+	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
+}
+
+func (h *AuthHandler) DeleteWatchProgress(w http.ResponseWriter, r *http.Request) {
+	user := middleware.GetUserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "Access token required")
+		return
+	}
+	key := chi.URLParam(r, "key")
+	if key != "" {
+		_ = h.authService.DeleteWatchProgress(r.Context(), user.UserID, key)
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
 }
 
 func (h *AuthHandler) SendOTP(w http.ResponseWriter, r *http.Request) {

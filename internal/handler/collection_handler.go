@@ -394,19 +394,39 @@ func (h *CollectionHandler) Follow(w http.ResponseWriter, r *http.Request) {
 
 	var body struct {
 		TargetUsername string `json:"targetUsername"`
+		Username       string `json:"username"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.TargetUsername == "" {
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	targetUsername := strings.TrimSpace(body.TargetUsername)
+	if targetUsername == "" {
+		targetUsername = strings.TrimSpace(body.Username)
+	}
+	if targetUsername == "" {
 		writeError(w, http.StatusBadRequest, "Target username is required")
 		return
 	}
 
-	if err := h.svc.Follow(r.Context(), user.Username, body.TargetUsername); err != nil {
+	currentUsername := strings.TrimSpace(user.Username)
+	if currentUsername == "" && user.UserID != "" {
+		if profile, err := h.svc.GetPublicProfile(r.Context(), "", user.UserID); err == nil && profile != nil {
+			if uMap, ok := profile["user"].(map[string]any); ok {
+				if uname, ok := uMap["username"].(string); ok {
+					currentUsername = uname
+				}
+			}
+		}
+	}
+
+	if err := h.svc.Follow(r.Context(), currentUsername, targetUsername); err != nil {
 		handleServiceError(w, err)
 		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{
-		"message": fmt.Sprintf("You are now following %s", body.TargetUsername),
+		"message": fmt.Sprintf("You are now following %s", targetUsername),
 	})
 }
 
@@ -419,19 +439,39 @@ func (h *CollectionHandler) Unfollow(w http.ResponseWriter, r *http.Request) {
 
 	var body struct {
 		TargetUsername string `json:"targetUsername"`
+		Username       string `json:"username"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.TargetUsername == "" {
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	targetUsername := strings.TrimSpace(body.TargetUsername)
+	if targetUsername == "" {
+		targetUsername = strings.TrimSpace(body.Username)
+	}
+	if targetUsername == "" {
 		writeError(w, http.StatusBadRequest, "Target username is required")
 		return
 	}
 
-	if err := h.svc.Unfollow(r.Context(), user.Username, body.TargetUsername); err != nil {
+	currentUsername := strings.TrimSpace(user.Username)
+	if currentUsername == "" && user.UserID != "" {
+		if profile, err := h.svc.GetPublicProfile(r.Context(), "", user.UserID); err == nil && profile != nil {
+			if uMap, ok := profile["user"].(map[string]any); ok {
+				if uname, ok := uMap["username"].(string); ok {
+					currentUsername = uname
+				}
+			}
+		}
+	}
+
+	if err := h.svc.Unfollow(r.Context(), currentUsername, targetUsername); err != nil {
 		handleServiceError(w, err)
 		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{
-		"message": fmt.Sprintf("You unfollowed %s", body.TargetUsername),
+		"message": fmt.Sprintf("You unfollowed %s", targetUsername),
 	})
 }
 

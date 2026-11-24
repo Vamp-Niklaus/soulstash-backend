@@ -129,6 +129,18 @@ func (m *mockUserRepo) UpdatePreferences(ctx context.Context, userID string, sho
 	return nil
 }
 
+func (m *mockUserRepo) GetWatchProgress(ctx context.Context, userID string) ([]map[string]any, error) {
+	return []map[string]any{}, nil
+}
+
+func (m *mockUserRepo) SaveWatchProgress(ctx context.Context, userID string, item map[string]any) error {
+	return nil
+}
+
+func (m *mockUserRepo) DeleteWatchProgress(ctx context.Context, userID, key string) error {
+	return nil
+}
+
 func setupTestAuthRouter() (chi.Router, *handler.AuthHandler, string) {
 	secret := "test-jwt-secret-key-at-least-32-chars-long"
 	repo := newMockUserRepo()

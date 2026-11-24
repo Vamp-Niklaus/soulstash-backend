@@ -30,6 +30,9 @@ type UserRepository interface {
 	UpdatePassword(ctx context.Context, userID, hashedPassword string) error
 	FindAllUsers(ctx context.Context) ([]domain.User, error)
 	UpdatePreferences(ctx context.Context, userID string, showAdult bool, adminMode int) error
+	GetWatchProgress(ctx context.Context, userID string) ([]map[string]any, error)
+	SaveWatchProgress(ctx context.Context, userID string, item map[string]any) error
+	DeleteWatchProgress(ctx context.Context, userID, key string) error
 }
 
 type mongoUserRepo struct {
@@ -272,6 +275,67 @@ func (r *mongoUserRepo) UpdatePreferences(ctx context.Context, userID string, sh
 			"adminMode": adminMode,
 			"updatedAt": time.Now(),
 		},
+	})
+	return err
+}
+
+func (r *mongoUserRepo) GetWatchProgress(ctx context.Context, userID string) ([]map[string]any, error) {
+	user, err := r.FindByID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if user.WatchProgress == nil {
+		return []map[string]any{}, nil
+	}
+	return user.WatchProgress, nil
+}
+
+func (r *mongoUserRepo) SaveWatchProgress(ctx context.Context, userID string, item map[string]any) error {
+	coll := r.db.Collection(mongodb.CollectionUsers)
+	filter := bson.M{}
+	if objID, ok := parseObjectIDOrUsername(userID); ok {
+		filter["_id"] = objID
+	} else {
+		filter["username"] = userID
+	}
+
+	key, _ := item["key"].(string)
+	if key == "" {
+		return nil
+	}
+
+	// Pull any existing entry with the same key
+	_, _ = coll.UpdateOne(ctx, filter, bson.M{
+		"$pull": bson.M{"watchProgress": bson.M{"key": key}},
+	})
+
+	// Push new entry to top ($position: 0), slice at 30
+	item["updatedAt"] = time.Now().Unix()
+	_, err := coll.UpdateOne(ctx, filter, bson.M{
+		"$push": bson.M{
+			"watchProgress": bson.M{
+				"$each":     []map[string]any{item},
+				"$position": 0,
+				"$slice":    30,
+			},
+		},
+		"$set": bson.M{"updatedAt": time.Now()},
+	})
+	return err
+}
+
+func (r *mongoUserRepo) DeleteWatchProgress(ctx context.Context, userID, key string) error {
+	coll := r.db.Collection(mongodb.CollectionUsers)
+	filter := bson.M{}
+	if objID, ok := parseObjectIDOrUsername(userID); ok {
+		filter["_id"] = objID
+	} else {
+		filter["username"] = userID
+	}
+
+	_, err := coll.UpdateOne(ctx, filter, bson.M{
+		"$pull": bson.M{"watchProgress": bson.M{"key": key}},
+		"$set":  bson.M{"updatedAt": time.Now()},
 	})
 	return err
 }

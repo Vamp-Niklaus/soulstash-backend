@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 
 	"soulstash/internal/domain"
@@ -40,14 +42,19 @@ func NewCollectionRepository(db *mongo.Database) CollectionRepository {
 func (r *mongoCollectionRepo) GetUser(ctx context.Context, userIDOrUsername string) (*domain.User, error) {
 	coll := r.db.Collection(mongodb.CollectionUsers)
 
-	filter := bson.M{}
-	if objID, ok := parseObjectIDOrUsername(userIDOrUsername); ok {
-		filter["$or"] = []bson.M{
-			{"_id": objID},
-			{"username": userIDOrUsername},
+	trimmed := strings.TrimSpace(userIDOrUsername)
+	var filter bson.M
+	if objID, ok := parseObjectIDOrUsername(trimmed); ok {
+		filter = bson.M{
+			"$or": []bson.M{
+				{"_id": objID},
+				{"username": bson.M{"$regex": fmt.Sprintf("^%s$", regexp.QuoteMeta(trimmed)), "$options": "i"}},
+			},
 		}
 	} else {
-		filter["username"] = userIDOrUsername
+		filter = bson.M{
+			"username": bson.M{"$regex": fmt.Sprintf("^%s$", regexp.QuoteMeta(trimmed)), "$options": "i"},
+		}
 	}
 
 	var user domain.User
@@ -107,8 +114,15 @@ func (r *mongoCollectionRepo) IncrementVersion(ctx context.Context, userID strin
 func (r *mongoCollectionRepo) FollowUser(ctx context.Context, currentUsername, targetUsername string) error {
 	coll := r.db.Collection(mongodb.CollectionUsers)
 
+	currRegex := bson.M{"$regex": fmt.Sprintf("^%s$", regexp.QuoteMeta(strings.TrimSpace(currentUsername))), "$options": "i"}
+	targetRegex := bson.M{"$regex": fmt.Sprintf("^%s$", regexp.QuoteMeta(strings.TrimSpace(targetUsername))), "$options": "i"}
+
+	// Self-heal: ensure following and followers are arrays if stored as null or missing
+	_, _ = coll.UpdateOne(ctx, bson.M{"username": currRegex, "following": bson.M{"$type": "null"}}, bson.M{"$set": bson.M{"following": []string{}}})
+	_, _ = coll.UpdateOne(ctx, bson.M{"username": targetRegex, "followers": bson.M{"$type": "null"}}, bson.M{"$set": bson.M{"followers": []string{}}})
+
 	// Add target to current user's following list
-	_, err := coll.UpdateOne(ctx, bson.M{"username": currentUsername}, bson.M{
+	_, err := coll.UpdateOne(ctx, bson.M{"username": currRegex}, bson.M{
 		"$addToSet": bson.M{"following": targetUsername},
 		"$set":      bson.M{"updatedAt": time.Now()},
 	})
@@ -117,7 +131,7 @@ func (r *mongoCollectionRepo) FollowUser(ctx context.Context, currentUsername, t
 	}
 
 	// Add current user to target's followers list
-	_, err = coll.UpdateOne(ctx, bson.M{"username": targetUsername}, bson.M{
+	_, err = coll.UpdateOne(ctx, bson.M{"username": targetRegex}, bson.M{
 		"$addToSet": bson.M{"followers": currentUsername},
 		"$set":      bson.M{"updatedAt": time.Now()},
 	})
@@ -127,7 +141,10 @@ func (r *mongoCollectionRepo) FollowUser(ctx context.Context, currentUsername, t
 func (r *mongoCollectionRepo) UnfollowUser(ctx context.Context, currentUsername, targetUsername string) error {
 	coll := r.db.Collection(mongodb.CollectionUsers)
 
-	_, err := coll.UpdateOne(ctx, bson.M{"username": currentUsername}, bson.M{
+	currRegex := bson.M{"$regex": fmt.Sprintf("^%s$", regexp.QuoteMeta(strings.TrimSpace(currentUsername))), "$options": "i"}
+	targetRegex := bson.M{"$regex": fmt.Sprintf("^%s$", regexp.QuoteMeta(strings.TrimSpace(targetUsername))), "$options": "i"}
+
+	_, err := coll.UpdateOne(ctx, bson.M{"username": currRegex}, bson.M{
 		"$pull": bson.M{"following": targetUsername},
 		"$set":  bson.M{"updatedAt": time.Now()},
 	})
@@ -135,7 +152,7 @@ func (r *mongoCollectionRepo) UnfollowUser(ctx context.Context, currentUsername,
 		return err
 	}
 
-	_, err = coll.UpdateOne(ctx, bson.M{"username": targetUsername}, bson.M{
+	_, err = coll.UpdateOne(ctx, bson.M{"username": targetRegex}, bson.M{
 		"$pull": bson.M{"followers": currentUsername},
 		"$set":  bson.M{"updatedAt": time.Now()},
 	})

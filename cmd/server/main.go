@@ -91,8 +91,8 @@ func main() {
 		loadPersistedAdultSettings(context.Background(), mongoClient.Database(), adultEngine, logger)
 	}
 	authSvc := service.NewAuthService(userRepo, brevoClient, cfg.JWTSecret)
-	collectionSvc := service.NewCollectionService(collectionRepo)
 	ratingsSvc := service.NewRatingsService(ratingsRepo, tmdbClient, cfg.OMDBAPIKeys...)
+	collectionSvc := service.NewCollectionService(collectionRepo, ratingsSvc)
 	if len(cfg.OMDBAPIKeys) > 0 {
 		logger.Info("Ratings service initialized with OMDb key pool", "keyCount", len(cfg.OMDBAPIKeys))
 	} else {

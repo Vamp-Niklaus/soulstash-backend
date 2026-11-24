@@ -35,6 +35,9 @@ type AuthService interface {
 	ForgotPassword(ctx context.Context, emailAddress string) error
 	ResetPassword(ctx context.Context, emailAddress, otp, newPassword string) error
 	VerifyOTPAndRegister(ctx context.Context, email, username, password, otp, fullName string) (*AuthResult, error)
+	GetWatchProgress(ctx context.Context, userID string) ([]map[string]any, error)
+	SaveWatchProgress(ctx context.Context, userID string, item map[string]any) error
+	DeleteWatchProgress(ctx context.Context, userID, key string) error
 }
 
 type AuthResult struct {
@@ -625,4 +628,16 @@ func generateRandomOTP() string {
 		return "123456"
 	}
 	return fmt.Sprintf("%06d", n.Int64()+100000)
+}
+
+func (s *authService) GetWatchProgress(ctx context.Context, userID string) ([]map[string]any, error) {
+	return s.userRepo.GetWatchProgress(ctx, userID)
+}
+
+func (s *authService) SaveWatchProgress(ctx context.Context, userID string, item map[string]any) error {
+	return s.userRepo.SaveWatchProgress(ctx, userID, item)
+}
+
+func (s *authService) DeleteWatchProgress(ctx context.Context, userID, key string) error {
+	return s.userRepo.DeleteWatchProgress(ctx, userID, key)
 }

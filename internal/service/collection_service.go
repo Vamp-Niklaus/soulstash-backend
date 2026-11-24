@@ -66,12 +66,17 @@ type UpdateCollectionInput struct {
 }
 
 type collectionService struct {
-	repo repository.CollectionRepository
+	repo       repository.CollectionRepository
+	ratingsSvc RatingsService
 }
 
 // NewCollectionService creates a new CollectionService
-func NewCollectionService(repo repository.CollectionRepository) CollectionService {
-	return &collectionService{repo: repo}
+func NewCollectionService(repo repository.CollectionRepository, ratingsSvc ...RatingsService) CollectionService {
+	var rSvc RatingsService
+	if len(ratingsSvc) > 0 {
+		rSvc = ratingsSvc[0]
+	}
+	return &collectionService{repo: repo, ratingsSvc: rSvc}
 }
 
 func (s *collectionService) GetCollections(ctx context.Context, userID string) ([]domain.UserCollection, int, error) {
@@ -250,6 +255,43 @@ func (s *collectionService) AddMovie(ctx context.Context, userID, collectionID s
 	idx := findCollectionIndex(user.Collections, collectionID)
 	if idx == -1 {
 		return nil, domain.NewAppError(domain.ErrNotFound, "Collection not found", 404)
+	}
+
+	// Enrich ratings if missing before storing
+	if s.ratingsSvc != nil {
+		tmdbID := int(getFloat(movie["id"]))
+		if tmdbID == 0 {
+			tmdbID = int(getFloat(movie["tmdbId"]))
+		}
+		if tmdbID == 0 {
+			tmdbID = int(getFloat(movie["tmdbID"]))
+		}
+		if tmdbID > 0 {
+			mediaType, _ := movie["media_type"].(string)
+			if mediaType == "" {
+				mediaType, _ = movie["mediaType"].(string)
+			}
+			if mediaType == "" {
+				mediaType, _ = movie["type"].(string)
+			}
+			imdbID, _ := movie["imdb_id"].(string)
+			var seedVoteAvg *float64
+			if va := getFloat(movie["vote_average"]); va > 0 {
+				seedVoteAvg = &va
+			}
+			rec, err := s.ratingsSvc.ResolveRating(ctx, tmdbID, mediaType, imdbID, seedVoteAvg)
+			if err == nil && rec != nil {
+				if rec.ImdbRating != nil && *rec.ImdbRating < InvalidImdbSentinel {
+					movie["imdb_rating"] = *rec.ImdbRating
+				}
+				if rec.ImdbID != "" {
+					movie["imdb_id"] = rec.ImdbID
+				}
+				if rec.VoteAverage != nil && (movie["vote_average"] == nil || getFloat(movie["vote_average"]) == 0) {
+					movie["vote_average"] = *rec.VoteAverage
+				}
+			}
+		}
 	}
 
 	movie["addedAt"] = time.Now()
@@ -479,14 +521,22 @@ func (s *collectionService) GetPublicProfile(ctx context.Context, currentUsernam
 }
 
 func (s *collectionService) Follow(ctx context.Context, currentUsername, targetUsername string) error {
-	if strings.EqualFold(currentUsername, targetUsername) {
+	if strings.EqualFold(strings.TrimSpace(currentUsername), strings.TrimSpace(targetUsername)) {
 		return domain.NewAppError(domain.ErrBadRequest, "Cannot follow yourself", 400)
 	}
-	return s.repo.FollowUser(ctx, currentUsername, targetUsername)
+	targetUser, err := s.repo.GetUser(ctx, targetUsername)
+	if err != nil || targetUser == nil {
+		return domain.NewAppError(domain.ErrNotFound, fmt.Sprintf("User '%s' not found", targetUsername), 404)
+	}
+	return s.repo.FollowUser(ctx, currentUsername, targetUser.Username)
 }
 
 func (s *collectionService) Unfollow(ctx context.Context, currentUsername, targetUsername string) error {
-	return s.repo.UnfollowUser(ctx, currentUsername, targetUsername)
+	targetUser, err := s.repo.GetUser(ctx, targetUsername)
+	if err != nil || targetUser == nil {
+		return domain.NewAppError(domain.ErrNotFound, fmt.Sprintf("User '%s' not found", targetUsername), 404)
+	}
+	return s.repo.UnfollowUser(ctx, currentUsername, targetUser.Username)
 }
 
 func (s *collectionService) GetFollowers(ctx context.Context, username string) ([]string, error) {

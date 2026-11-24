@@ -163,3 +163,28 @@ func TestPreventDeletingDefaultCollection(t *testing.T) {
 	_ = json.NewDecoder(rec.Body).Decode(&errResp)
 	assert.Equal(t, "Default collections cannot be deleted", errResp["error"])
 }
+
+func TestFollowAndUnfollowUser(t *testing.T) {
+	r, token, _ := setupTestCollectionRouter()
+
+	followBody := map[string]string{"targetUsername": "targetuser"}
+	bodyBytes, _ := json.Marshal(followBody)
+	req := httptest.NewRequest(http.MethodPost, "/api/user/follow", bytes.NewReader(bodyBytes))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]string
+	_ = json.NewDecoder(rec.Body).Decode(&resp)
+	assert.Contains(t, resp["message"], "targetuser")
+
+	unfollowReq := httptest.NewRequest(http.MethodPost, "/api/user/unfollow", bytes.NewReader(bodyBytes))
+	unfollowReq.Header.Set("Authorization", "Bearer "+token)
+	unfollowReq.Header.Set("Content-Type", "application/json")
+	unfollowRec := httptest.NewRecorder()
+	r.ServeHTTP(unfollowRec, unfollowReq)
+
+	assert.Equal(t, http.StatusOK, unfollowRec.Code)
+}

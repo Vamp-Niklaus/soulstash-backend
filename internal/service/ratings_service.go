@@ -188,6 +188,9 @@ func (s *ratingsService) ResolveRating(ctx context.Context, tmdbID int, mediaTyp
 }
 
 func (s *ratingsService) BatchEnrich(ctx context.Context, items []map[string]any) []map[string]any {
+	if len(items) == 0 {
+		return items
+	}
 	type result struct {
 		idx  int
 		item map[string]any
@@ -205,16 +208,35 @@ func (s *ratingsService) BatchEnrich(ctx context.Context, items []map[string]any
 			if tmdbID == 0 {
 				tmdbID = int(getFloat(cloned["tmdbID"]))
 			}
+			if tmdbID == 0 {
+				tmdbID = int(getFloat(cloned["tmdbId"]))
+			}
 			mediaType, _ := cloned["mediaType"].(string)
 			if mediaType == "" {
 				mediaType, _ = cloned["media_type"].(string)
 			}
+			if mediaType == "" {
+				if _, ok := cloned["first_air_date"]; ok {
+					mediaType = "Series"
+				} else if _, ok := cloned["name"]; ok && cloned["title"] == nil {
+					mediaType = "Series"
+				}
+			}
 			imdbID, _ := cloned["imdb_id"].(string)
+			var seedVoteAvg *float64
+			if va := getFloat(cloned["vote_average"]); va > 0 {
+				seedVoteAvg = &va
+			}
 
-			res, err := s.ResolveRating(ctx, tmdbID, mediaType, imdbID, nil)
+			res, err := s.ResolveRating(ctx, tmdbID, mediaType, imdbID, seedVoteAvg)
 			if err == nil && res != nil {
 				cloned["imdb_rating"] = res.ImdbRating
-				cloned["imdb_id"] = res.ImdbID
+				if res.ImdbID != "" {
+					cloned["imdb_id"] = res.ImdbID
+				}
+				if res.VoteAverage != nil && (cloned["vote_average"] == nil || getFloat(cloned["vote_average"]) == 0) {
+					cloned["vote_average"] = *res.VoteAverage
+				}
 				cloned["rating_lookup_attempted"] = true
 			}
 			ch <- result{idx: index, item: cloned}

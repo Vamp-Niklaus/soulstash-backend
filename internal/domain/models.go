@@ -30,6 +30,7 @@ type User struct {
 	FavoritePeoplePublic bool             `bson:"favoritePeoplePublic,omitempty" json:"favoritePeoplePublic,omitempty"`
 	Followers            []string         `bson:"followers" json:"followers"`
 	Following            []string         `bson:"following" json:"following"`
+	WatchProgress        []map[string]any `bson:"watchProgress,omitempty" json:"watchProgress,omitempty"`
 	CreatedAt            time.Time        `bson:"createdAt" json:"createdAt"`
 	UpdatedAt            time.Time        `bson:"updatedAt" json:"updatedAt"`
 }
