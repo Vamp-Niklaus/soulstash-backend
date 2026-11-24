@@ -33,6 +33,11 @@ type homeCacheEntry struct {
 	expiresAt time.Time
 }
 
+type personCreditsCacheEntry struct {
+	data      map[string]any
+	expiresAt time.Time
+}
+
 type ContentHandler struct {
 	tmdbClient      tmdb.Client
 	ratingsSvc      service.RatingsService
@@ -44,6 +49,9 @@ type ContentHandler struct {
 
 	homeCacheMu sync.RWMutex
 	homeCache   map[int]*homeCacheEntry
+
+	personCreditsCacheMu sync.RWMutex
+	personCreditsCache   map[string]*personCreditsCacheEntry
 }
 
 func (h *ContentHandler) SetDatabase(db *mongo.Database) {
@@ -71,6 +79,7 @@ func NewContentHandler(
 		jwtSecret:       jwtSecret,
 		watchmodeAPIKey: watchmodeKey,
 		homeCache:       make(map[int]*homeCacheEntry),
+		personCreditsCache: make(map[string]*personCreditsCacheEntry),
 	}
 	setGlobalLetterboxdContentHandler(handler)
 	return handler
@@ -288,6 +297,22 @@ func enrichSliceOfMaps(ctx context.Context, ratingsSvc service.RatingsService, r
 	for i, m := range enriched {
 		res[i] = m
 	}
+	return res
+}
+
+func enrichTopCredits(ctx context.Context, ratingsSvc service.RatingsService, rawList []any, limit int) []any {
+	if len(rawList) == 0 || ratingsSvc == nil {
+		return rawList
+	}
+	toEnrichCount := len(rawList)
+	if limit > 0 && toEnrichCount > limit {
+		toEnrichCount = limit
+	}
+	topSlice := rawList[:toEnrichCount]
+	enrichedTop := enrichSliceOfMaps(ctx, ratingsSvc, topSlice)
+	res := make([]any, len(rawList))
+	copy(res, enrichedTop)
+	copy(res[toEnrichCount:], rawList[toEnrichCount:])
 	return res
 }
 
@@ -1354,10 +1379,10 @@ func (h *ContentHandler) GetPersonDetail(w http.ResponseWriter, r *http.Request)
 		h.filterPersonCredits(credits, h.searchAdminMode(r))
 		if h.ratingsSvc != nil {
 			if cast, ok := credits["cast"].([]any); ok {
-				credits["cast"] = enrichSliceOfMaps(r.Context(), h.ratingsSvc, cast)
+				credits["cast"] = enrichTopCredits(r.Context(), h.ratingsSvc, cast, 25)
 			}
 			if crew, ok := credits["crew"].([]any); ok {
-				credits["crew"] = enrichSliceOfMaps(r.Context(), h.ratingsSvc, crew)
+				credits["crew"] = enrichTopCredits(r.Context(), h.ratingsSvc, crew, 10)
 			}
 		}
 	}
@@ -1366,20 +1391,42 @@ func (h *ContentHandler) GetPersonDetail(w http.ResponseWriter, r *http.Request)
 
 func (h *ContentHandler) GetPersonCredits(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	adminMode := h.searchAdminMode(r)
+	cacheKey := fmt.Sprintf("%s:%d", id, adminMode)
+
+	// Check in-memory person credits cache
+	h.personCreditsCacheMu.RLock()
+	cached, ok := h.personCreditsCache[cacheKey]
+	if ok && cached != nil && time.Now().Before(cached.expiresAt) {
+		h.personCreditsCacheMu.RUnlock()
+		writeJSON(w, http.StatusOK, cached.data)
+		return
+	}
+	h.personCreditsCacheMu.RUnlock()
+
 	data, err := h.tmdbClient.Get(r.Context(), fmt.Sprintf("/3/person/%s/combined_credits", id), requestQueryParams(r))
 	if err != nil {
 		writeError(w, http.StatusNotFound, "Person credits not found")
 		return
 	}
-	h.filterPersonCredits(data, h.searchAdminMode(r))
+	h.filterPersonCredits(data, adminMode)
 	if h.ratingsSvc != nil {
 		if cast, ok := data["cast"].([]any); ok {
-			data["cast"] = enrichSliceOfMaps(r.Context(), h.ratingsSvc, cast)
+			data["cast"] = enrichTopCredits(r.Context(), h.ratingsSvc, cast, 25)
 		}
 		if crew, ok := data["crew"].([]any); ok {
-			data["crew"] = enrichSliceOfMaps(r.Context(), h.ratingsSvc, crew)
+			data["crew"] = enrichTopCredits(r.Context(), h.ratingsSvc, crew, 10)
 		}
 	}
+
+	// Cache person credits for 1 hour
+	h.personCreditsCacheMu.Lock()
+	h.personCreditsCache[cacheKey] = &personCreditsCacheEntry{
+		data:      data,
+		expiresAt: time.Now().Add(1 * time.Hour),
+	}
+	h.personCreditsCacheMu.Unlock()
+
 	writeJSON(w, http.StatusOK, data)
 }
 
