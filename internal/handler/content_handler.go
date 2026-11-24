@@ -28,6 +28,11 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 )
 
+type homeCacheEntry struct {
+	data      map[string]any
+	expiresAt time.Time
+}
+
 type ContentHandler struct {
 	tmdbClient      tmdb.Client
 	ratingsSvc      service.RatingsService
@@ -36,6 +41,9 @@ type ContentHandler struct {
 	jwtSecret       string
 	watchmodeAPIKey string
 	db              *mongo.Database
+
+	homeCacheMu sync.RWMutex
+	homeCache   map[int]*homeCacheEntry
 }
 
 func (h *ContentHandler) SetDatabase(db *mongo.Database) {
@@ -62,6 +70,7 @@ func NewContentHandler(
 		userRepo:        userRepo,
 		jwtSecret:       jwtSecret,
 		watchmodeAPIKey: watchmodeKey,
+		homeCache:       make(map[int]*homeCacheEntry),
 	}
 	setGlobalLetterboxdContentHandler(handler)
 	return handler
@@ -641,9 +650,10 @@ func (h *ContentHandler) DiscoverMovies(w http.ResponseWriter, r *http.Request) 
 				maxPages = 10
 			}
 			if adminMode == 2 {
-				maxPages = 20
 				if len(items) < 18 {
-					maxPages = 50
+					maxPages = tmdbMaxPages
+				} else {
+					maxPages = 20
 				}
 			}
 			if pagesFetched >= maxPages {
@@ -853,7 +863,10 @@ func (h *ContentHandler) discoverBollywood(w http.ResponseWriter, r *http.Reques
 		}
 		curP := startP
 		pagesFetched := 0
-		for len(items) < 36 && pagesFetched < 50 && curP <= tmdbMaxPages {
+		for len(items) < 36 && curP <= tmdbMaxPages {
+			if len(items) >= 18 && pagesFetched >= 20 {
+				break
+			}
 			batchSize := 10
 			batch := make([]int, 0, batchSize)
 			for b := 0; b < batchSize; b++ {
@@ -1894,6 +1907,128 @@ func (h *ContentHandler) GetGenres(w http.ResponseWriter, r *http.Request) {
 func (h *ContentHandler) GetHome(w http.ResponseWriter, r *http.Request) {
 	adminMode := h.searchAdminMode(r)
 
+	// In-memory cache lookup
+	h.homeCacheMu.RLock()
+	cached, ok := h.homeCache[adminMode]
+	if ok && cached != nil && time.Now().Before(cached.expiresAt) {
+		h.homeCacheMu.RUnlock()
+		writeJSON(w, http.StatusOK, cached.data)
+		return
+	}
+	h.homeCacheMu.RUnlock()
+
+	// In adult mode: fetch discovery adult feeds in 10-page parallel batches until at least 18 titles are found
+	if adminMode == 2 {
+		trendingItems := make([]map[string]any, 0, 36)
+		popularMovieItems := make([]map[string]any, 0, 36)
+		popularSeriesItems := make([]map[string]any, 0, 36)
+
+		curP := 1
+		tmdbMaxP := 500
+		pagesFetched := 0
+
+		type fetchRes struct {
+			page      int
+			mediaType string
+			data      map[string]any
+		}
+
+		for len(trendingItems) < 36 && curP <= tmdbMaxP {
+			if len(trendingItems) >= 18 && pagesFetched >= 20 {
+				break
+			}
+			batchSize := 10
+			batch := make([]int, 0, batchSize)
+			for b := 0; b < batchSize; b++ {
+				batch = append(batch, curP+b)
+			}
+			curP += batchSize
+			pagesFetched += batchSize
+
+			ch := make(chan fetchRes, len(batch)*2)
+			var wg sync.WaitGroup
+			for _, p := range batch {
+				pNum := p
+				wg.Add(2)
+				go func() {
+					defer wg.Done()
+					d, _ := h.tmdbClient.Get(r.Context(), "/3/discover/movie", map[string]string{
+						"page":          strconv.Itoa(pNum),
+						"include_adult": "true",
+						"sort_by":       "popularity.desc",
+					})
+					ch <- fetchRes{page: pNum, mediaType: "movie", data: d}
+				}()
+				go func() {
+					defer wg.Done()
+					d, _ := h.tmdbClient.Get(r.Context(), "/3/discover/tv", map[string]string{
+						"page":          strconv.Itoa(pNum),
+						"include_adult": "true",
+						"sort_by":       "popularity.desc",
+					})
+					ch <- fetchRes{page: pNum, mediaType: "tv", data: d}
+				}()
+			}
+			wg.Wait()
+			close(ch)
+
+			for res := range ch {
+				if res.data != nil {
+					if tp := int(getFloat(res.data["total_pages"])); tp > 0 && tp < tmdbMaxP {
+						tmdbMaxP = tp
+					}
+					extracted := discoverItems(res.data, res.mediaType, adminMode, h.adultEngine, false)
+					for _, itm := range extracted {
+						if res.mediaType == "movie" {
+							popularMovieItems = append(popularMovieItems, itm)
+						} else {
+							popularSeriesItems = append(popularSeriesItems, itm)
+						}
+						trendingItems = append(trendingItems, itm)
+					}
+				}
+			}
+
+			trendingItems = uniquePopularItems(trendingItems)
+			popularMovieItems = uniquePopularItems(popularMovieItems)
+			popularSeriesItems = uniquePopularItems(popularSeriesItems)
+		}
+
+		if len(trendingItems) > 36 {
+			trendingItems = trendingItems[:36]
+		}
+		if len(popularMovieItems) > 36 {
+			popularMovieItems = popularMovieItems[:36]
+		}
+		if len(popularSeriesItems) > 36 {
+			popularSeriesItems = popularSeriesItems[:36]
+		}
+
+		if h.ratingsSvc != nil {
+			trendingItems = h.ratingsSvc.BatchEnrich(r.Context(), trendingItems)
+			popularMovieItems = h.ratingsSvc.BatchEnrich(r.Context(), popularMovieItems)
+			popularSeriesItems = h.ratingsSvc.BatchEnrich(r.Context(), popularSeriesItems)
+		}
+
+		payload := map[string]any{
+			"trending":      map[string]any{"results": trendingItems},
+			"popular":       map[string]any{"results": trendingItems},
+			"popularMovies": map[string]any{"results": popularMovieItems},
+			"popularSeries": map[string]any{"results": popularSeriesItems},
+		}
+
+		// Cache adult home data for 30 minutes
+		h.homeCacheMu.Lock()
+		h.homeCache[adminMode] = &homeCacheEntry{
+			data:      payload,
+			expiresAt: time.Now().Add(30 * time.Minute),
+		}
+		h.homeCacheMu.Unlock()
+
+		writeJSON(w, http.StatusOK, payload)
+		return
+	}
+
 	type fetchRes struct {
 		name string
 		data map[string]any
@@ -1977,11 +2112,21 @@ func (h *ContentHandler) GetHome(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	payload := map[string]any{
 		"trending":      trending,
 		"popularMovies": popularMovies,
 		"popularSeries": popularSeries,
-	})
+	}
+
+	// Cache home data for 15 minutes
+	h.homeCacheMu.Lock()
+	h.homeCache[adminMode] = &homeCacheEntry{
+		data:      payload,
+		expiresAt: time.Now().Add(15 * time.Minute),
+	}
+	h.homeCacheMu.Unlock()
+
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (h *ContentHandler) QueryRatings(w http.ResponseWriter, r *http.Request) {
