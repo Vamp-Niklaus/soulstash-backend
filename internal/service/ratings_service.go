@@ -17,7 +17,22 @@ import (
 	"soulstash/internal/repository"
 )
 
-const InvalidImdbSentinel = 10.0
+const (
+	InvalidImdbSentinel = 10.0
+	ValidRatingTTL      = 30 * 24 * time.Hour // 30 days
+	SentinelRatingTTL   = 14 * 24 * time.Hour // 14 days
+)
+
+func isRatingExpired(record *domain.RatingRecord) bool {
+	if record == nil || record.UpdatedAt.IsZero() {
+		return true
+	}
+	age := time.Since(record.UpdatedAt)
+	if record.ImdbRating == nil || *record.ImdbRating >= InvalidImdbSentinel {
+		return age > SentinelRatingTTL
+	}
+	return age > ValidRatingTTL
+}
 
 type RatingsService interface {
 	ResolveRating(ctx context.Context, tmdbID int, mediaType string, seedImdbID string, seedVoteAvg *float64) (*domain.RatingRecord, error)
@@ -82,18 +97,27 @@ func (s *ratingsService) ResolveRating(ctx context.Context, tmdbID int, mediaTyp
 		}, nil
 	}
 
+	imdbID := strings.TrimSpace(seedImdbID)
+	voteAvg := seedVoteAvg
+
 	// 1. Check local DB cache
 	cached, err := s.repo.FindRating(ctx, tmdbID, normType)
 	if err == nil && cached != nil && cached.ImdbID != "" {
-		cached.ImdbRating = filterImdbSentinel(cached.ImdbRating)
-		cached.LookupAttempted = true
-		cached.Source = "cache"
-		return cached, nil
+		if !isRatingExpired(cached) {
+			cached.ImdbRating = filterImdbSentinel(cached.ImdbRating)
+			cached.LookupAttempted = true
+			cached.Source = "cache"
+			return cached, nil
+		}
+		if imdbID == "" {
+			imdbID = cached.ImdbID
+		}
+		if voteAvg == nil {
+			voteAvg = cached.VoteAverage
+		}
 	}
 
 	// 2. Resolve IMDb ID and TMDB vote average
-	imdbID := strings.TrimSpace(seedImdbID)
-	voteAvg := seedVoteAvg
 
 	if imdbID == "" && s.tmdbClient != nil {
 		_ = s.repo.IncrementMetric(ctx, "tmdbDetailFetchCount")
@@ -131,6 +155,8 @@ func (s *ratingsService) ResolveRating(ctx context.Context, tmdbID int, mediaTyp
 		rating, err := s.fetchOmdbRating(ctx, imdbID)
 		if err == nil && rating != nil {
 			imdbRating = rating
+		} else if cached != nil && cached.ImdbRating != nil && *cached.ImdbRating < InvalidImdbSentinel {
+			imdbRating = cached.ImdbRating
 		}
 	}
 
@@ -229,6 +255,15 @@ func (s *ratingsService) GetStoredRating(ctx context.Context, tmdbID int, mediaT
 	if record == nil {
 		return nil, domain.NewAppError(domain.ErrNotFound, "Rating row not found", 404)
 	}
+
+	if isRatingExpired(record) {
+		fresh, err := s.ResolveRating(ctx, tmdbID, mediaType, record.ImdbID, record.VoteAverage)
+		if err == nil && fresh != nil {
+			return fresh, nil
+		}
+	}
+
+	record.ImdbRating = filterImdbSentinel(record.ImdbRating)
 	return record, nil
 }
 

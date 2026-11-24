@@ -158,3 +158,90 @@ func TestRatingsService_RoundRobinKeys(t *testing.T) {
 		}
 	}
 }
+
+func TestRatingsService_CacheExpiration(t *testing.T) {
+	repo := newMockRatingsRepo()
+	svc := NewRatingsService(repo, nil, "")
+
+	// 1. Valid rating updated 10 days ago (fresh, within 30 days)
+	rating85 := 8.5
+	repo.ratings["301_Movie"] = &domain.RatingRecord{
+		TmdbID:     301,
+		MediaType:  "Movie",
+		Type:       "Movie",
+		ImdbID:     "tt301",
+		ImdbRating: &rating85,
+		UpdatedAt:  time.Now().Add(-10 * 24 * time.Hour),
+	}
+	res1, err := svc.ResolveRating(context.Background(), 301, "Movie", "", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res1.Source != "cache" {
+		t.Errorf("expected fresh rating to be served from cache, got source %s", res1.Source)
+	}
+
+	// 2. Valid rating updated 35 days ago (expired, > 30 days)
+	repo.ratings["302_Movie"] = &domain.RatingRecord{
+		TmdbID:     302,
+		MediaType:  "Movie",
+		Type:       "Movie",
+		ImdbID:     "tt302",
+		ImdbRating: &rating85,
+		UpdatedAt:  time.Now().Add(-35 * 24 * time.Hour),
+	}
+	res2, err := svc.ResolveRating(context.Background(), 302, "Movie", "", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res2.Source == "cache" {
+		t.Errorf("expected expired rating to trigger lookup, got cache")
+	}
+
+	// 3. Sentinel rating updated 5 days ago (fresh, within 14 days)
+	sentinel := InvalidImdbSentinel
+	repo.ratings["303_Movie"] = &domain.RatingRecord{
+		TmdbID:     303,
+		MediaType:  "Movie",
+		Type:       "Movie",
+		ImdbID:     "tt303",
+		ImdbRating: &sentinel,
+		UpdatedAt:  time.Now().Add(-5 * 24 * time.Hour),
+	}
+	res3, err := svc.ResolveRating(context.Background(), 303, "Movie", "", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res3.Source != "cache" {
+		t.Errorf("expected fresh sentinel to be served from cache, got source %s", res3.Source)
+	}
+	if res3.ImdbRating != nil {
+		t.Errorf("expected sentinel rating to be filtered to nil, got %v", *res3.ImdbRating)
+	}
+
+	// 4. Sentinel rating updated 20 days ago (expired, > 14 days)
+	repo.ratings["304_Movie"] = &domain.RatingRecord{
+		TmdbID:     304,
+		MediaType:  "Movie",
+		Type:       "Movie",
+		ImdbID:     "tt304",
+		ImdbRating: &sentinel,
+		UpdatedAt:  time.Now().Add(-20 * 24 * time.Hour),
+	}
+	res4, err := svc.ResolveRating(context.Background(), 304, "Movie", "", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res4.Source == "cache" {
+		t.Errorf("expected expired sentinel to trigger lookup, got cache")
+	}
+
+	// 5. GetStoredRating with expired record resolves and returns filtered sentinel
+	stored, err := svc.GetStoredRating(context.Background(), 304, "Movie")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stored.ImdbRating != nil {
+		t.Errorf("expected GetStoredRating sentinel to be filtered to nil, got %v", *stored.ImdbRating)
+	}
+}
