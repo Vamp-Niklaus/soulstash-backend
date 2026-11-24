@@ -309,8 +309,9 @@ func (h *ContentHandler) hasSuppressedCollectionPart(r *http.Request, parent map
 func (h *ContentHandler) GetTMDBCollection(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	data, err := h.tmdbClient.Get(r.Context(), fmt.Sprintf("/3/collection/%s", id), requestQueryParams(r))
-	if err != nil {
-		writeError(w, http.StatusNotFound, "Collection not found")
+	if err != nil || data == nil {
+		// Return 200 with empty parts instead of 404 to avoid console error spam when a movie has an invalid collection ID
+		writeJSON(w, http.StatusOK, map[string]any{"id": id, "name": "", "parts": []any{}})
 		return
 	}
 	adminMode := h.searchAdminMode(r)
@@ -322,8 +323,7 @@ func (h *ContentHandler) GetTMDBCollection(w http.ResponseWriter, r *http.Reques
 			continue
 		}
 		if !searchItemVisible(part, adminMode, h.adultEngine) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "Collection not found"})
-			return
+			continue
 		}
 		filtered = append(filtered, part)
 	}
@@ -474,8 +474,11 @@ func (h *ContentHandler) DiscoverMovies(w http.ResponseWriter, r *http.Request) 
 	if limit > 100 {
 		limit = 100
 	}
-	targetCount := max(limit, 36)
-	if page == 1 && targetCount < 14 {
+	targetCount := limit
+	if r.URL.Query().Get("limit") == "" {
+		targetCount = max(limit, 36)
+	}
+	if page == 1 && targetCount < 14 && r.URL.Query().Get("limit") == "" {
 		targetCount = 14
 	}
 	search := strings.TrimSpace(r.URL.Query().Get("search"))
@@ -613,7 +616,7 @@ func (h *ContentHandler) DiscoverMovies(w http.ResponseWriter, r *http.Request) 
 		curPage := clientTmdbPage
 		initialBatchSize := 2
 		if adminMode == 2 {
-			initialBatchSize = 4
+			initialBatchSize = 10
 		}
 		firstBatch := make([]int, 0, initialBatchSize)
 		for b := 0; b < initialBatchSize; b++ {
@@ -649,7 +652,7 @@ func (h *ContentHandler) DiscoverMovies(w http.ResponseWriter, r *http.Request) 
 
 			batchSize := 2
 			if adminMode == 2 {
-				batchSize = 4
+				batchSize = 10
 			}
 			if pagesFetched+batchSize > maxPages {
 				batchSize = maxPages - pagesFetched
@@ -734,57 +737,192 @@ func (h *ContentHandler) DiscoverMovies(w http.ResponseWriter, r *http.Request) 
 
 func (h *ContentHandler) discoverBollywood(w http.ResponseWriter, r *http.Request) {
 	page := parsePositiveInt(r.URL.Query().Get("page"), 1)
+	clientTmdbPage := parsePositiveInt(r.URL.Query().Get("tmdb_page"), 0)
 	limit := parsePositiveInt(r.URL.Query().Get("limit"), 20)
 	if limit > 100 {
 		limit = 100
 	}
 	targetCount := limit
-	if page == 1 && targetCount < 14 {
+	if r.URL.Query().Get("limit") == "" {
+		targetCount = max(limit, 36)
+	}
+	if page == 1 && targetCount < 14 && r.URL.Query().Get("limit") == "" {
 		targetCount = 14
 	}
 	adminMode := h.searchAdminMode(r)
-	currentWindow := (page - 1) / 3
-	currentTmdbPage := (page-1)%3 + 1
+
+	type fetchRes struct {
+		page      int
+		mediaType string
+		data      map[string]any
+		err       error
+	}
+
+	fetchBollywoodBatch := func(pages []int, useDateWindow bool, window int) (map[int]map[string]any, map[int]map[string]any, int, int) {
+		ch := make(chan fetchRes, len(pages)*2)
+		var wg sync.WaitGroup
+
+		startDate, endDate := "", ""
+		if useDateWindow {
+			startDate, endDate = fourMonthWindow(window)
+		}
+
+		for _, p := range pages {
+			pNum := p
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				common := map[string]string{
+					"language":               "en-US",
+					"page":                   strconv.Itoa(pNum),
+					"include_adult":          strconv.FormatBool(adminMode != 0),
+					"with_origin_country":    "IN",
+					"with_original_language": "hi|ta|te|ml|kn|bn|mr|pa",
+					"sort_by":                "popularity.desc",
+				}
+				if startDate != "" {
+					common["primary_release_date.gte"] = startDate
+					common["primary_release_date.lte"] = endDate
+				}
+				d, err := h.tmdbClient.Get(r.Context(), "/3/discover/movie", common)
+				ch <- fetchRes{page: pNum, mediaType: "movie", data: d, err: err}
+			}()
+			go func() {
+				defer wg.Done()
+				common := map[string]string{
+					"language":               "en-US",
+					"page":                   strconv.Itoa(pNum),
+					"include_adult":          strconv.FormatBool(adminMode != 0),
+					"with_origin_country":    "IN",
+					"with_original_language": "hi|ta|te|ml|kn|bn|mr|pa",
+					"sort_by":                "popularity.desc",
+				}
+				if startDate != "" {
+					common["first_air_date.gte"] = startDate
+					common["first_air_date.lte"] = endDate
+				}
+				d, err := h.tmdbClient.Get(r.Context(), "/3/discover/tv", common)
+				ch <- fetchRes{page: pNum, mediaType: "tv", data: d, err: err}
+			}()
+		}
+		wg.Wait()
+		close(ch)
+
+		mPages := make(map[int]map[string]any)
+		tPages := make(map[int]map[string]any)
+		maxP := 1
+		totalR := 0
+		for res := range ch {
+			if res.err == nil && res.data != nil {
+				if res.mediaType == "movie" {
+					mPages[res.page] = res.data
+				} else {
+					tPages[res.page] = res.data
+				}
+				if p := int(getFloat(res.data["total_pages"])); p > maxP {
+					maxP = p
+				}
+				totalR += int(getFloat(res.data["total_results"]))
+			}
+		}
+		return mPages, tPages, maxP, totalR
+	}
+
+	extractBollywood := func(mPages, tPages map[int]map[string]any, pList []int) []map[string]any {
+		collected := make([]map[string]any, 0)
+		for _, p := range pList {
+			if mD := mPages[p]; mD != nil {
+				collected = append(collected, discoverItems(mD, "Movie", adminMode, h.adultEngine, true)...)
+			}
+			if tD := tPages[p]; tD != nil {
+				collected = append(collected, discoverItems(tD, "Series", adminMode, h.adultEngine, true)...)
+			}
+		}
+		return collected
+	}
+
 	items := make([]map[string]any, 0, targetCount)
-	for attempts := 0; len(items) < targetCount && attempts < 8; attempts++ {
-		startDate, endDate := fourMonthWindow(currentWindow)
-		common := map[string]string{
-			"language": "en-US", "page": strconv.Itoa(currentTmdbPage),
-			"include_adult":       strconv.FormatBool(adminMode != 0),
-			"with_origin_country": "IN", "with_original_language": "hi|ta|te|ml|kn|bn|mr|pa",
-			"sort_by": "popularity.desc",
+	lastTmdbPage := 0
+	tmdbMaxPages := 500
+
+	if adminMode == 2 {
+		// In adult mode: call 10 TMDB pages in parallel!
+		startP := clientTmdbPage
+		if startP == 0 {
+			startP = (page-1)*10 + 1
 		}
-		movieParams, tvParams := cloneStringMap(common), cloneStringMap(common)
-		movieParams["primary_release_date.gte"], movieParams["primary_release_date.lte"] = startDate, endDate
-		tvParams["first_air_date.gte"], tvParams["first_air_date.lte"] = startDate, endDate
-		movieData, movieErr := h.tmdbClient.Get(r.Context(), "/3/discover/movie", movieParams)
-		tvData, tvErr := h.tmdbClient.Get(r.Context(), "/3/discover/tv", tvParams)
-		if movieErr == nil {
-			items = append(items, discoverItems(movieData, "Movie", adminMode, h.adultEngine, true)...)
+		curP := startP
+		pagesFetched := 0
+		for len(items) < 36 && pagesFetched < 50 && curP <= tmdbMaxPages {
+			batchSize := 10
+			batch := make([]int, 0, batchSize)
+			for b := 0; b < batchSize; b++ {
+				batch = append(batch, curP+b)
+			}
+			mPages, tPages, maxP, _ := fetchBollywoodBatch(batch, false, 0)
+			if maxP > 0 {
+				tmdbMaxPages = maxP
+			}
+			curP += batchSize
+			pagesFetched += batchSize
+			lastTmdbPage = batch[len(batch)-1]
+
+			newItems := extractBollywood(mPages, tPages, batch)
+			if len(newItems) > 0 {
+				items = append(items, newItems...)
+				items = uniquePopularItems(items)
+				items = withoutAnimeItems(items)
+			}
 		}
-		if tvErr == nil {
-			items = append(items, discoverItems(tvData, "Series", adminMode, h.adultEngine, true)...)
+	} else {
+		// Safe / Standard mode: fetch 4 pages in parallel per window
+		currentWindow := (page - 1) / 3
+		windowPages := []int{1, 2, 3, 4}
+		if clientTmdbPage > 0 {
+			windowPages = []int{clientTmdbPage, clientTmdbPage + 1, clientTmdbPage + 2, clientTmdbPage + 3}
+			currentWindow = (clientTmdbPage - 1) / 4
 		}
+		mPages, tPages, maxP, _ := fetchBollywoodBatch(windowPages, true, currentWindow)
+		if maxP > 0 {
+			tmdbMaxPages = maxP
+		}
+		lastTmdbPage = windowPages[len(windowPages)-1]
+		items = append(items, extractBollywood(mPages, tPages, windowPages)...)
 		items = uniquePopularItems(items)
 		items = withoutAnimeItems(items)
-		totalPages := max(int(getFloat(movieData["total_pages"])), int(getFloat(tvData["total_pages"])))
-		if currentTmdbPage < min(max(1, totalPages), 3) {
-			currentTmdbPage++
-		} else {
-			currentWindow++
-			currentTmdbPage = 1
+
+		if len(items) < targetCount {
+			nextPages := []int{lastTmdbPage + 1, lastTmdbPage + 2, lastTmdbPage + 3, lastTmdbPage + 4}
+			mP2, tP2, _, _ := fetchBollywoodBatch(nextPages, true, currentWindow+1)
+			lastTmdbPage = nextPages[len(nextPages)-1]
+			items = append(items, extractBollywood(mP2, tP2, nextPages)...)
+			items = uniquePopularItems(items)
+			items = withoutAnimeItems(items)
 		}
 	}
+
 	if len(items) > targetCount {
 		items = items[:targetCount]
 	}
 	if h.ratingsSvc != nil {
 		items = h.ratingsSvc.BatchEnrich(r.Context(), items)
 	}
+
 	pages := max(500, page+20)
+	nextTmdbPage := lastTmdbPage + 1
+	hasMore := lastTmdbPage < tmdbMaxPages
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"movies":     items,
-		"pagination": map[string]int{"page": page, "limit": limit, "total": pages * limit, "pages": pages},
+		"movies":  items,
+		"results": items,
+		"pagination": map[string]any{
+			"page":           page,
+			"limit":          len(items),
+			"total":          pages * limit,
+			"pages":          pages,
+			"next_tmdb_page": nextTmdbPage,
+			"has_more":       hasMore,
+		},
 	})
 }
 
@@ -835,10 +973,6 @@ func discoverItems(data map[string]any, mediaType string, adminMode int, adultEn
 		posterPath, _ := item["poster_path"].(string)
 		if strings.TrimSpace(posterPath) == "" {
 			continue
-		}
-		if bollywood && adminMode == 2 {
-			item["adult"] = true
-			item["_isAdultDiscover"] = true
 		}
 		if !searchItemVisible(item, adminMode, adultEngine) {
 			continue
@@ -1237,22 +1371,99 @@ func (h *ContentHandler) GetPersonCredits(w http.ResponseWriter, r *http.Request
 }
 
 func (h *ContentHandler) GetTrending(w http.ResponseWriter, r *http.Request) {
+	adminMode := h.searchAdminMode(r)
+	if adminMode == 2 {
+		q := r.URL.Query()
+		if q.Get("sort_by") == "" {
+			q.Set("sort_by", "popularity.desc")
+		}
+		r.URL.RawQuery = q.Encode()
+		h.DiscoverMovies(w, r)
+		return
+	}
+
+	page := parsePositiveInt(r.URL.Query().Get("page"), 1)
 	timeWindow := r.URL.Query().Get("time_window")
 	if timeWindow == "" {
 		timeWindow = "day"
 	}
-	data, err := h.tmdbClient.Get(r.Context(), fmt.Sprintf("/3/trending/all/%s", timeWindow), requestQueryParams(r))
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "Failed to fetch trending content")
-		return
+
+	p1 := 2*page - 1
+	p2 := 2 * page
+
+	type fetchRes struct {
+		page int
+		data map[string]any
+		err  error
 	}
-	h.filterContentResults(data, h.searchAdminMode(r))
-	if h.ratingsSvc != nil {
-		if results, ok := data["results"].([]any); ok {
-			data["results"] = enrichSliceOfMaps(r.Context(), h.ratingsSvc, results)
+
+	ch := make(chan fetchRes, 2)
+	var wg sync.WaitGroup
+
+	fetchPage := func(p int, tw string) {
+		defer wg.Done()
+		params := requestQueryParams(r)
+		params["page"] = strconv.Itoa(p)
+		d, err := h.tmdbClient.Get(r.Context(), fmt.Sprintf("/3/trending/all/%s", tw), params)
+		ch <- fetchRes{page: p, data: d, err: err}
+	}
+
+	wg.Add(2)
+	go fetchPage(p1, timeWindow)
+	go fetchPage(p2, timeWindow)
+	wg.Wait()
+	close(ch)
+
+	resultsMap := make(map[int]map[string]any)
+	maxPages := 500
+	totalResults := 1000
+	for res := range ch {
+		if res.err == nil && res.data != nil {
+			resultsMap[res.page] = res.data
+			if tp := int(getFloat(res.data["total_pages"])); tp > 0 && (tp < maxPages || maxPages == 500) {
+				maxPages = tp
+			}
+			if tr := int(getFloat(res.data["total_results"])); tr > 0 {
+				totalResults = tr
+			}
 		}
 	}
-	writeJSON(w, http.StatusOK, data)
+
+	var combined []any
+	for _, p := range []int{p1, p2} {
+		if d := resultsMap[p]; d != nil {
+			if resList, ok := d["results"].([]any); ok {
+				combined = append(combined, resList...)
+			}
+		}
+	}
+
+	if len(combined) == 0 && timeWindow == "day" && p1 > 10 {
+		weekData, err := h.tmdbClient.Get(r.Context(), "/3/trending/all/week", map[string]string{
+			"page": strconv.Itoa(max(1, page-10)),
+		})
+		if err == nil && weekData != nil {
+			if resList, ok := weekData["results"].([]any); ok {
+				combined = append(combined, resList...)
+			}
+		}
+	}
+
+	payload := map[string]any{"results": combined}
+	h.filterContentResults(payload, adminMode)
+
+	filteredResults, _ := payload["results"].([]any)
+	if h.ratingsSvc != nil && len(filteredResults) > 0 {
+		filteredResults = enrichSliceOfMaps(r.Context(), h.ratingsSvc, filteredResults)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"page":          page,
+		"results":       filteredResults,
+		"movies":        filteredResults,
+		"total_pages":   max(maxPages, 500),
+		"total_results": totalResults,
+	})
 }
 
 func (h *ContentHandler) GetPopular(w http.ResponseWriter, r *http.Request) {
@@ -1280,8 +1491,11 @@ func (h *ContentHandler) GetPopular(w http.ResponseWriter, r *http.Request) {
 	if limit > 100 {
 		limit = 100
 	}
-	targetCount := max(limit, 36)
-	if page == 1 && targetCount < 14 {
+	targetCount := limit
+	if r.URL.Query().Get("limit") == "" {
+		targetCount = max(limit, 36)
+	}
+	if page == 1 && targetCount < 14 && r.URL.Query().Get("limit") == "" {
 		targetCount = 14
 	}
 	adminMode := h.searchAdminMode(r)
