@@ -130,14 +130,106 @@ func (m *mockUserRepo) UpdatePreferences(ctx context.Context, userID string, sho
 }
 
 func (m *mockUserRepo) GetWatchProgress(ctx context.Context, userID string) ([]map[string]any, error) {
-	return []map[string]any{}, nil
+	u, err := m.FindByID(ctx, userID)
+	if err != nil {
+		return []map[string]any{}, err
+	}
+	if u.WatchProgress == nil {
+		return []map[string]any{}, nil
+	}
+	return u.WatchProgress, nil
 }
 
 func (m *mockUserRepo) SaveWatchProgress(ctx context.Context, userID string, item map[string]any) error {
+	u, err := m.FindByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	key, _ := item["key"].(string)
+	seriesGroup, _ := item["seriesGroup"].(string)
+	filtered := make([]map[string]any, 0, len(u.WatchProgress)+1)
+	filtered = append(filtered, item)
+	for _, existing := range u.WatchProgress {
+		ek, _ := existing["key"].(string)
+		eg, _ := existing["seriesGroup"].(string)
+		if ek == key || (seriesGroup != "" && (eg == seriesGroup || strings.HasPrefix(ek, seriesGroup+"_s"))) {
+			continue
+		}
+		filtered = append(filtered, existing)
+	}
+	u.WatchProgress = filtered
 	return nil
 }
 
 func (m *mockUserRepo) DeleteWatchProgress(ctx context.Context, userID, key string) error {
+	u, err := m.FindByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	filtered := make([]map[string]any, 0, len(u.WatchProgress))
+	for _, existing := range u.WatchProgress {
+		ek, _ := existing["key"].(string)
+		if ek == key {
+			continue
+		}
+		filtered = append(filtered, existing)
+	}
+	u.WatchProgress = filtered
+	return nil
+}
+
+func (m *mockUserRepo) ClearWatchProgress(ctx context.Context, userID string) error {
+	u, err := m.FindByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	u.WatchProgress = []map[string]any{}
+	return nil
+}
+
+func (m *mockUserRepo) GetWatchedEpisodes(ctx context.Context, userID string) ([]string, error) {
+	u, err := m.FindByID(ctx, userID)
+	if err != nil {
+		return []string{}, err
+	}
+	if u.WatchedEpisodes == nil {
+		return []string{}, nil
+	}
+	return u.WatchedEpisodes, nil
+}
+
+func (m *mockUserRepo) AddWatchedEpisodes(ctx context.Context, userID string, epKeys []string) error {
+	u, err := m.FindByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	seen := make(map[string]bool, len(u.WatchedEpisodes))
+	for _, k := range u.WatchedEpisodes {
+		seen[k] = true
+	}
+	for _, k := range epKeys {
+		clean := strings.ToLower(strings.TrimSpace(k))
+		if clean != "" && !seen[clean] {
+			seen[clean] = true
+			u.WatchedEpisodes = append(u.WatchedEpisodes, clean)
+		}
+	}
+	return nil
+}
+
+func (m *mockUserRepo) RemoveWatchedEpisode(ctx context.Context, userID, epKey string) error {
+	u, err := m.FindByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	clean := strings.ToLower(strings.TrimSpace(epKey))
+	next := make([]string, 0, len(u.WatchedEpisodes))
+	for _, k := range u.WatchedEpisodes {
+		if k != clean {
+			next = append(next, k)
+		}
+	}
+	u.WatchedEpisodes = next
 	return nil
 }
 
@@ -280,4 +372,71 @@ func TestSendOTPDoesNotExposeDevelopmentCode(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&payload))
 	assert.Equal(t, "OTP sent successfully", payload["message"])
 	assert.NotContains(t, payload, "otp")
+}
+
+func TestWatchProgressAndWatchedEpisodesSync(t *testing.T) {
+	r, _, _ := setupTestAuthRouter()
+
+	// Register a user to obtain a valid JWT
+	regReq := httptest.NewRequest(http.MethodPost, "/api/auth/register", bytes.NewBufferString(`{"username":"bob","password":"password123","fullName":"Bob Builder"}`))
+	regReq.Header.Set("Content-Type", "application/json")
+	regRec := httptest.NewRecorder()
+	r.ServeHTTP(regRec, regReq)
+	require.Equal(t, http.StatusCreated, regRec.Code)
+
+	var regResp service.AuthResult
+	require.NoError(t, json.NewDecoder(regRec.Body).Decode(&regResp))
+	token := regResp.Token
+
+	// Save watched episode S1E3
+	weReq := httptest.NewRequest(http.MethodPost, "/api/auth/watched-episodes", bytes.NewBufferString(`{"keys":["1399_s1_e3"]}`))
+	weReq.Header.Set("Content-Type", "application/json")
+	weReq.Header.Set("Authorization", "Bearer "+token)
+	weRec := httptest.NewRecorder()
+	r.ServeHTTP(weRec, weReq)
+	require.Equal(t, http.StatusOK, weRec.Code)
+
+	// Save continue watching next episode S1E4
+	cwReq := httptest.NewRequest(http.MethodPost, "/api/auth/watch-progress", bytes.NewBufferString(`{"key":"1399_s1_e4","seriesGroup":"1399","id":1399,"seasonNumber":1,"episodeNumber":4,"isNextEpisode":true}`))
+	cwReq.Header.Set("Content-Type", "application/json")
+	cwReq.Header.Set("Authorization", "Bearer "+token)
+	cwRec := httptest.NewRecorder()
+	r.ServeHTTP(cwRec, cwReq)
+	require.Equal(t, http.StatusOK, cwRec.Code)
+
+	// Clear continue watching should NOT clear watched episodes
+	clearReq := httptest.NewRequest(http.MethodDelete, "/api/auth/watch-progress", nil)
+	clearReq.Header.Set("Authorization", "Bearer "+token)
+	clearRec := httptest.NewRecorder()
+	r.ServeHTTP(clearRec, clearReq)
+	require.Equal(t, http.StatusOK, clearRec.Code)
+
+	// Verify continue watching is empty
+	getCwReq := httptest.NewRequest(http.MethodGet, "/api/auth/watch-progress", nil)
+	getCwReq.Header.Set("Authorization", "Bearer "+token)
+	getCwRec := httptest.NewRecorder()
+	r.ServeHTTP(getCwRec, getCwReq)
+	require.Equal(t, http.StatusOK, getCwRec.Code)
+	var cwList []map[string]any
+	require.NoError(t, json.NewDecoder(getCwRec.Body).Decode(&cwList))
+	assert.Len(t, cwList, 0)
+
+	// Verify watched episodes remain intact in DB
+	getWeReq := httptest.NewRequest(http.MethodGet, "/api/auth/watched-episodes", nil)
+	getWeReq.Header.Set("Authorization", "Bearer "+token)
+	getWeRec := httptest.NewRecorder()
+	r.ServeHTTP(getWeRec, getWeReq)
+	require.Equal(t, http.StatusOK, getWeRec.Code)
+	var weResp struct {
+		Episodes []string `json:"episodes"`
+	}
+	require.NoError(t, json.NewDecoder(getWeRec.Body).Decode(&weResp))
+	assert.Equal(t, []string{"1399_s1_e3"}, weResp.Episodes)
+
+	// Remove watched episode manually
+	delWeReq := httptest.NewRequest(http.MethodDelete, "/api/auth/watched-episodes/1399_s1_e3", nil)
+	delWeReq.Header.Set("Authorization", "Bearer "+token)
+	delWeRec := httptest.NewRecorder()
+	r.ServeHTTP(delWeRec, delWeReq)
+	require.Equal(t, http.StatusOK, delWeRec.Code)
 }

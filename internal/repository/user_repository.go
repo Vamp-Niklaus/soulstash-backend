@@ -33,6 +33,10 @@ type UserRepository interface {
 	GetWatchProgress(ctx context.Context, userID string) ([]map[string]any, error)
 	SaveWatchProgress(ctx context.Context, userID string, item map[string]any) error
 	DeleteWatchProgress(ctx context.Context, userID, key string) error
+	ClearWatchProgress(ctx context.Context, userID string) error
+	GetWatchedEpisodes(ctx context.Context, userID string) ([]string, error)
+	AddWatchedEpisodes(ctx context.Context, userID string, epKeys []string) error
+	RemoveWatchedEpisode(ctx context.Context, userID, epKey string) error
 }
 
 type mongoUserRepo struct {
@@ -279,6 +283,41 @@ func (r *mongoUserRepo) UpdatePreferences(ctx context.Context, userID string, sh
 	return err
 }
 
+var seriesEpisodeSuffixRe = regexp.MustCompile(`_s[^_]*_e[^_]*$`)
+
+func userFilter(userID string) bson.M {
+	filter := bson.M{}
+	if objID, ok := parseObjectIDOrUsername(userID); ok {
+		filter["_id"] = objID
+	} else {
+		filter["username"] = userID
+	}
+	return filter
+}
+
+func watchProgressPullFilter(key string, item map[string]any) bson.M {
+	seriesGroup := ""
+	if item != nil {
+		seriesGroup, _ = item["seriesGroup"].(string)
+	}
+	if seriesGroup == "" {
+		stripped := seriesEpisodeSuffixRe.ReplaceAllString(key, "")
+		if stripped != "" && stripped != key {
+			seriesGroup = stripped
+		}
+	}
+	if seriesGroup != "" {
+		return bson.M{
+			"$or": []bson.M{
+				{"key": key},
+				{"seriesGroup": seriesGroup},
+				{"key": bson.M{"$regex": "^" + regexp.QuoteMeta(seriesGroup) + `_s[^_]*_e[^_]*$`}},
+			},
+		}
+	}
+	return bson.M{"key": key}
+}
+
 func (r *mongoUserRepo) GetWatchProgress(ctx context.Context, userID string) ([]map[string]any, error) {
 	user, err := r.FindByID(ctx, userID)
 	if err != nil {
@@ -292,25 +331,20 @@ func (r *mongoUserRepo) GetWatchProgress(ctx context.Context, userID string) ([]
 
 func (r *mongoUserRepo) SaveWatchProgress(ctx context.Context, userID string, item map[string]any) error {
 	coll := r.db.Collection(mongodb.CollectionUsers)
-	filter := bson.M{}
-	if objID, ok := parseObjectIDOrUsername(userID); ok {
-		filter["_id"] = objID
-	} else {
-		filter["username"] = userID
-	}
+	filter := userFilter(userID)
 
 	key, _ := item["key"].(string)
 	if key == "" {
 		return nil
 	}
 
-	// Pull any existing entry with the same key
+	// Remove previous progress entries for this title or series so only the newest episode remains.
 	_, _ = coll.UpdateOne(ctx, filter, bson.M{
-		"$pull": bson.M{"watchProgress": bson.M{"key": key}},
+		"$pull": bson.M{"watchProgress": watchProgressPullFilter(key, item)},
 	})
 
-	// Push new entry to top ($position: 0), slice at 30
-	item["updatedAt"] = time.Now().Unix()
+	// Store updatedAt in Unix milliseconds to match browser Date.now()
+	item["updatedAt"] = time.Now().UnixMilli()
 	_, err := coll.UpdateOne(ctx, filter, bson.M{
 		"$push": bson.M{
 			"watchProgress": bson.M{
@@ -326,15 +360,76 @@ func (r *mongoUserRepo) SaveWatchProgress(ctx context.Context, userID string, it
 
 func (r *mongoUserRepo) DeleteWatchProgress(ctx context.Context, userID, key string) error {
 	coll := r.db.Collection(mongodb.CollectionUsers)
-	filter := bson.M{}
-	if objID, ok := parseObjectIDOrUsername(userID); ok {
-		filter["_id"] = objID
-	} else {
-		filter["username"] = userID
-	}
+	filter := userFilter(userID)
 
 	_, err := coll.UpdateOne(ctx, filter, bson.M{
-		"$pull": bson.M{"watchProgress": bson.M{"key": key}},
+		"$pull": bson.M{"watchProgress": watchProgressPullFilter(key, nil)},
+		"$set":  bson.M{"updatedAt": time.Now()},
+	})
+	return err
+}
+
+func (r *mongoUserRepo) ClearWatchProgress(ctx context.Context, userID string) error {
+	coll := r.db.Collection(mongodb.CollectionUsers)
+	filter := userFilter(userID)
+
+	_, err := coll.UpdateOne(ctx, filter, bson.M{
+		"$set": bson.M{
+			"watchProgress": []map[string]any{},
+			"updatedAt":     time.Now(),
+		},
+	})
+	return err
+}
+
+func (r *mongoUserRepo) GetWatchedEpisodes(ctx context.Context, userID string) ([]string, error) {
+	user, err := r.FindByID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if user.WatchedEpisodes == nil {
+		return []string{}, nil
+	}
+	return user.WatchedEpisodes, nil
+}
+
+func (r *mongoUserRepo) AddWatchedEpisodes(ctx context.Context, userID string, epKeys []string) error {
+	clean := make([]string, 0, len(epKeys))
+	seen := make(map[string]bool, len(epKeys))
+	for _, k := range epKeys {
+		trimmed := strings.ToLower(strings.TrimSpace(k))
+		if trimmed == "" || seen[trimmed] {
+			continue
+		}
+		seen[trimmed] = true
+		clean = append(clean, trimmed)
+	}
+	if len(clean) == 0 {
+		return nil
+	}
+
+	coll := r.db.Collection(mongodb.CollectionUsers)
+	filter := userFilter(userID)
+
+	_, err := coll.UpdateOne(ctx, filter, bson.M{
+		"$addToSet": bson.M{
+			"watchedEpisodes": bson.M{"$each": clean},
+		},
+		"$set": bson.M{"updatedAt": time.Now()},
+	})
+	return err
+}
+
+func (r *mongoUserRepo) RemoveWatchedEpisode(ctx context.Context, userID, epKey string) error {
+	trimmed := strings.ToLower(strings.TrimSpace(epKey))
+	if trimmed == "" {
+		return nil
+	}
+	coll := r.db.Collection(mongodb.CollectionUsers)
+	filter := userFilter(userID)
+
+	_, err := coll.UpdateOne(ctx, filter, bson.M{
+		"$pull": bson.M{"watchedEpisodes": trimmed},
 		"$set":  bson.M{"updatedAt": time.Now()},
 	})
 	return err

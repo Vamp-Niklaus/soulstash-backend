@@ -38,6 +38,10 @@ type AuthService interface {
 	GetWatchProgress(ctx context.Context, userID string) ([]map[string]any, error)
 	SaveWatchProgress(ctx context.Context, userID string, item map[string]any) error
 	DeleteWatchProgress(ctx context.Context, userID, key string) error
+	ClearWatchProgress(ctx context.Context, userID string) error
+	GetWatchedEpisodes(ctx context.Context, userID string) ([]string, error)
+	AddWatchedEpisodes(ctx context.Context, userID string, epKeys []string) error
+	RemoveWatchedEpisode(ctx context.Context, userID, epKey string) error
 }
 
 type AuthResult struct {
@@ -640,4 +644,20 @@ func (s *authService) SaveWatchProgress(ctx context.Context, userID string, item
 
 func (s *authService) DeleteWatchProgress(ctx context.Context, userID, key string) error {
 	return s.userRepo.DeleteWatchProgress(ctx, userID, key)
+}
+
+func (s *authService) ClearWatchProgress(ctx context.Context, userID string) error {
+	return s.userRepo.ClearWatchProgress(ctx, userID)
+}
+
+func (s *authService) GetWatchedEpisodes(ctx context.Context, userID string) ([]string, error) {
+	return s.userRepo.GetWatchedEpisodes(ctx, userID)
+}
+
+func (s *authService) AddWatchedEpisodes(ctx context.Context, userID string, epKeys []string) error {
+	return s.userRepo.AddWatchedEpisodes(ctx, userID, epKeys)
+}
+
+func (s *authService) RemoveWatchedEpisode(ctx context.Context, userID, epKey string) error {
+	return s.userRepo.RemoveWatchedEpisode(ctx, userID, epKey)
 }

@@ -154,6 +154,22 @@ func (m *mockUserRepo) DeleteWatchProgress(ctx context.Context, userID, key stri
 	return nil
 }
 
+func (m *mockUserRepo) ClearWatchProgress(ctx context.Context, userID string) error {
+	return nil
+}
+
+func (m *mockUserRepo) GetWatchedEpisodes(ctx context.Context, userID string) ([]string, error) {
+	return []string{}, nil
+}
+
+func (m *mockUserRepo) AddWatchedEpisodes(ctx context.Context, userID string, epKeys []string) error {
+	return nil
+}
+
+func (m *mockUserRepo) RemoveWatchedEpisode(ctx context.Context, userID, epKey string) error {
+	return nil
+}
+
 type mockCollectionRepo struct {
 	mu   sync.Mutex
 	user *domain.User

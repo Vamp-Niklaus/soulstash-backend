@@ -50,7 +50,11 @@ func (h *AuthHandler) RegisterRoutes(r chi.Router) {
 		protected.Post("/update-profile", h.UpdateProfile)
 		protected.Get("/watch-progress", h.GetWatchProgress)
 		protected.Post("/watch-progress", h.SaveWatchProgress)
+		protected.Delete("/watch-progress", h.ClearWatchProgress)
 		protected.Delete("/watch-progress/{key}", h.DeleteWatchProgress)
+		protected.Get("/watched-episodes", h.GetWatchedEpisodes)
+		protected.Post("/watched-episodes", h.SaveWatchedEpisodes)
+		protected.Delete("/watched-episodes/{key}", h.DeleteWatchedEpisode)
 	})
 }
 
@@ -291,6 +295,78 @@ func (h *AuthHandler) DeleteWatchProgress(w http.ResponseWriter, r *http.Request
 	key := chi.URLParam(r, "key")
 	if key != "" {
 		_ = h.authService.DeleteWatchProgress(r.Context(), user.UserID, key)
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
+}
+
+func (h *AuthHandler) ClearWatchProgress(w http.ResponseWriter, r *http.Request) {
+	user := middleware.GetUserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "Access token required")
+		return
+	}
+	if err := h.authService.ClearWatchProgress(r.Context(), user.UserID); err != nil {
+		handleServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
+}
+
+func (h *AuthHandler) GetWatchedEpisodes(w http.ResponseWriter, r *http.Request) {
+	user := middleware.GetUserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "Access token required")
+		return
+	}
+	episodes, err := h.authService.GetWatchedEpisodes(r.Context(), user.UserID)
+	if err != nil || episodes == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"episodes": []string{}})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"episodes": episodes})
+}
+
+func (h *AuthHandler) SaveWatchedEpisodes(w http.ResponseWriter, r *http.Request) {
+	user := middleware.GetUserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "Access token required")
+		return
+	}
+	var body struct {
+		Key  string   `json:"key"`
+		Keys []string `json:"keys"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	keys := body.Keys
+	if body.Key != "" {
+		keys = append(keys, body.Key)
+	}
+	if err := h.authService.AddWatchedEpisodes(r.Context(), user.UserID, keys); err != nil {
+		handleServiceError(w, err)
+		return
+	}
+	episodes, _ := h.authService.GetWatchedEpisodes(r.Context(), user.UserID)
+	if episodes == nil {
+		episodes = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "episodes": episodes})
+}
+
+func (h *AuthHandler) DeleteWatchedEpisode(w http.ResponseWriter, r *http.Request) {
+	user := middleware.GetUserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "Access token required")
+		return
+	}
+	key := chi.URLParam(r, "key")
+	if key != "" {
+		if err := h.authService.RemoveWatchedEpisode(r.Context(), user.UserID, key); err != nil {
+			handleServiceError(w, err)
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
 }
