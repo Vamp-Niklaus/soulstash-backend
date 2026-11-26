@@ -188,3 +188,25 @@ func TestFollowAndUnfollowUser(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, unfollowRec.Code)
 }
+
+func TestEnrichMetadataEndpoint(t *testing.T) {
+	r, token, _ := setupTestCollectionRouter()
+
+	bodyBytes, _ := json.Marshal(map[string]any{
+		"items": []map[string]any{
+			{"contentId": 123, "mediaType": "Movie"},
+		},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/user/collections/Watchlist/enrich-metadata", bytes.NewReader(bodyBytes))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var res service.CollectionMutationResult
+	err := json.NewDecoder(rec.Body).Decode(&res)
+	require.NoError(t, err)
+	assert.Equal(t, "Collection metadata updated", res.Message)
+	assert.Len(t, res.Collections, 2)
+}

@@ -100,17 +100,18 @@ func (s *ratingsService) ResolveRating(ctx context.Context, tmdbID int, mediaTyp
 	imdbID := strings.TrimSpace(seedImdbID)
 	voteAvg := seedVoteAvg
 
-	// 1. Check local DB cache
+	// 1. Check local DB cache (honors valid 30d TTL and 10.0 sentinel 14d TTL even when imdbID is empty)
 	cached, err := s.repo.FindRating(ctx, tmdbID, normType)
-	if err == nil && cached != nil && cached.ImdbID != "" {
+	if err == nil && cached != nil {
 		if !isRatingExpired(cached) {
-			cached.ImdbRating = filterImdbSentinel(cached.ImdbRating)
-			cached.LookupAttempted = true
-			cached.Source = "cache"
-			return cached, nil
+			res := *cached
+			res.ImdbRating = filterImdbSentinel(cached.ImdbRating)
+			res.LookupAttempted = true
+			res.Source = "cache"
+			return &res, nil
 		}
 		if imdbID == "" {
-			imdbID = cached.ImdbID
+			imdbID = strings.TrimSpace(cached.ImdbID)
 		}
 		if voteAvg == nil {
 			voteAvg = cached.VoteAverage
@@ -118,7 +119,6 @@ func (s *ratingsService) ResolveRating(ctx context.Context, tmdbID int, mediaTyp
 	}
 
 	// 2. Resolve IMDb ID and TMDB vote average
-
 	if imdbID == "" && s.tmdbClient != nil {
 		_ = s.repo.IncrementMetric(ctx, "tmdbDetailFetchCount")
 		endpoint := fmt.Sprintf("/3/movie/%d", tmdbID)
@@ -150,23 +150,47 @@ func (s *ratingsService) ResolveRating(ctx context.Context, tmdbID int, mediaTyp
 
 	// 3. Query OMDb if IMDb ID found
 	var imdbRating *float64
+	var omdbTransientErr error
 	if imdbID != "" && len(s.omdbKeys) > 0 {
 		_ = s.repo.IncrementMetric(ctx, "omdbFetchCount")
 		rating, err := s.fetchOmdbRating(ctx, imdbID)
+		if err != nil {
+			omdbTransientErr = err
+		}
 		if err == nil && rating != nil {
 			imdbRating = rating
-		} else if cached != nil && cached.ImdbRating != nil && *cached.ImdbRating < InvalidImdbSentinel {
+		} else if err != nil && cached != nil && cached.ImdbRating != nil && *cached.ImdbRating < InvalidImdbSentinel {
 			imdbRating = cached.ImdbRating
 		}
 	}
 
-	// 4. Cache record into MongoDB
+	// Avoid overwriting/poisoning cache with 10.0 sentinel when OMDb failed due to quota or transient network error
+	if omdbTransientErr != nil {
+		var ts time.Time
+		if cached != nil {
+			ts = cached.UpdatedAt
+		}
+		return &domain.RatingRecord{
+			TmdbID:          tmdbID,
+			MediaType:       normType,
+			Type:            normType,
+			ImdbID:          imdbID,
+			ImdbRating:      filterImdbSentinel(imdbRating),
+			VoteAverage:     voteAvg,
+			LookupAttempted: false,
+			Source:          "omdb-unavailable",
+			UpdatedAt:       ts,
+		}, nil
+	}
+
+	// 4. Upsert rating (either resolved rating or 10.0 sentinel) with fresh UpdatedAt
 	ratingToStore := imdbRating
 	if ratingToStore == nil {
 		sentinel := InvalidImdbSentinel
 		ratingToStore = &sentinel
 	}
 
+	now := time.Now()
 	record := &domain.RatingRecord{
 		TmdbID:          tmdbID,
 		MediaType:       normType,
@@ -176,7 +200,7 @@ func (s *ratingsService) ResolveRating(ctx context.Context, tmdbID int, mediaTyp
 		VoteAverage:     voteAvg,
 		LookupAttempted: true,
 		Source:          "fresh-lookup",
-		UpdatedAt:       time.Now(),
+		UpdatedAt:       now,
 	}
 
 	_ = s.repo.UpsertRating(ctx, record)
@@ -197,47 +221,49 @@ func (s *ratingsService) BatchEnrich(ctx context.Context, items []map[string]any
 	}
 
 	ch := make(chan result, len(items))
+	sem := make(chan struct{}, 10)
 	for i, itm := range items {
 		go func(index int, item map[string]any) {
-			cloned := make(map[string]any, len(item)+3)
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			cloned := make(map[string]any, len(item)+8)
 			for k, v := range item {
 				cloned[k] = v
 			}
 
-			tmdbID := int(getFloat(cloned["id"]))
-			if tmdbID == 0 {
-				tmdbID = int(getFloat(cloned["tmdbID"]))
-			}
-			if tmdbID == 0 {
-				tmdbID = int(getFloat(cloned["tmdbId"]))
-			}
-			mediaType, _ := cloned["mediaType"].(string)
-			if mediaType == "" {
-				mediaType, _ = cloned["media_type"].(string)
-			}
-			if mediaType == "" {
-				if _, ok := cloned["first_air_date"]; ok {
-					mediaType = "Series"
-				} else if _, ok := cloned["name"]; ok && cloned["title"] == nil {
-					mediaType = "Series"
-				}
-			}
+			tmdbID := extractIntField(cloned, "id", "tmdbID", "tmdbId", "contentId", "movieId", "seriesId", "mediaId")
+			normType := resolveMediaTypeFromMap(cloned)
 			imdbID, _ := cloned["imdb_id"].(string)
+			if imdbID == "" {
+				imdbID, _ = cloned["imdbID"].(string)
+			}
 			var seedVoteAvg *float64
-			if va := getFloat(cloned["vote_average"]); va > 0 {
+			if va := getFloat(cloned["vote_average"]); va > 0 && va < InvalidImdbSentinel {
 				seedVoteAvg = &va
 			}
 
-			res, err := s.ResolveRating(ctx, tmdbID, mediaType, imdbID, seedVoteAvg)
+			if tmdbID > 0 {
+				cloned["tmdbID"] = tmdbID
+			}
+			cloned["mediaType"] = normType
+
+			res, err := s.ResolveRating(ctx, tmdbID, normType, imdbID, seedVoteAvg)
 			if err == nil && res != nil {
 				cloned["imdb_rating"] = res.ImdbRating
 				if res.ImdbID != "" {
 					cloned["imdb_id"] = res.ImdbID
+					cloned["imdbID"] = res.ImdbID
 				}
-				if res.VoteAverage != nil && (cloned["vote_average"] == nil || getFloat(cloned["vote_average"]) == 0) {
+				if res.VoteAverage != nil && *res.VoteAverage > 0 && *res.VoteAverage < InvalidImdbSentinel &&
+					(cloned["vote_average"] == nil || getFloat(cloned["vote_average"]) == 0 || getFloat(cloned["vote_average"]) >= InvalidImdbSentinel) {
 					cloned["vote_average"] = *res.VoteAverage
 				}
-				cloned["rating_lookup_attempted"] = true
+				cloned["lookup_attempted"] = res.LookupAttempted
+				cloned["rating_lookup_attempted"] = res.LookupAttempted
+				if !res.UpdatedAt.IsZero() {
+					cloned["rating_checked_at"] = res.UpdatedAt.UTC().Format(time.RFC3339)
+				}
 			}
 			ch <- result{idx: index, item: cloned}
 		}(i, itm)
@@ -299,10 +325,11 @@ func (s *ratingsService) fetchOmdbRating(ctx context.Context, imdbID string) (*f
 		maxAttempts = 3
 	}
 
+	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		apiKey := s.getNextOMDBKey()
 		if apiKey == "" {
-			return nil, nil
+			return nil, lastErr
 		}
 
 		omdbURL := fmt.Sprintf("https://www.omdbapi.com/?i=%s&apikey=%s", url.QueryEscape(imdbID), url.QueryEscape(apiKey))
@@ -313,7 +340,17 @@ func (s *ratingsService) fetchOmdbRating(ctx context.Context, imdbID string) (*f
 
 		resp, err := s.httpClient.Do(req)
 		if err != nil {
-			return nil, err
+			if ctx.Err() != nil {
+				return nil, err
+			}
+			lastErr = err
+			continue
+		}
+
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusUnauthorized || resp.StatusCode >= 500 {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("omdb http %d", resp.StatusCode)
+			continue
 		}
 
 		var payload struct {
@@ -325,15 +362,18 @@ func (s *ratingsService) fetchOmdbRating(ctx context.Context, imdbID string) (*f
 		resp.Body.Close()
 
 		if decodeErr != nil {
-			return nil, decodeErr
+			lastErr = decodeErr
+			continue
 		}
 
 		if payload.Response != "True" {
 			errLower := strings.ToLower(payload.Error)
 			// If key reached its daily limit or was invalid, try next key in the pool
 			if strings.Contains(errLower, "limit") || strings.Contains(errLower, "key") {
+				lastErr = errors.New(payload.Error)
 				continue
 			}
+			// Genuine not found / no data response from OMDb
 			return nil, nil
 		}
 
@@ -349,7 +389,25 @@ func (s *ratingsService) fetchOmdbRating(ctx context.Context, imdbID string) (*f
 		return &val, nil
 	}
 
-	return nil, nil
+	return nil, lastErr
+}
+
+func extractIntField(m map[string]any, keys ...string) int {
+	for _, k := range keys {
+		val, exists := m[k]
+		if !exists || val == nil {
+			continue
+		}
+		if f := getFloat(val); f > 0 {
+			return int(f)
+		}
+		if s, ok := val.(string); ok {
+			if n, err := strconv.Atoi(strings.TrimSpace(s)); err == nil && n > 0 {
+				return n
+			}
+		}
+	}
+	return 0
 }
 
 func filterImdbSentinel(val *float64) *float64 {
@@ -357,6 +415,30 @@ func filterImdbSentinel(val *float64) *float64 {
 		return nil
 	}
 	return val
+}
+
+func resolveMediaTypeFromMap(m map[string]any) string {
+	mediaType, _ := m["mediaType"].(string)
+	if mediaType == "" {
+		mediaType, _ = m["media_type"].(string)
+	}
+	if mediaType == "" {
+		mediaType, _ = m["type"].(string)
+	}
+	if mediaType == "" {
+		if extractIntField(m, "seriesId", "series_id") > 0 {
+			mediaType = "Series"
+		} else if extractIntField(m, "movieId", "movie_id") > 0 {
+			mediaType = "Movie"
+		} else if fa, _ := m["first_air_date"].(string); strings.TrimSpace(fa) != "" {
+			mediaType = "Series"
+		} else if _, ok := m["first_air_date"]; ok {
+			mediaType = "Series"
+		} else if _, ok := m["name"]; ok && m["title"] == nil {
+			mediaType = "Series"
+		}
+	}
+	return normalizeMediaType(mediaType)
 }
 
 func normalizeMediaType(m string) string {

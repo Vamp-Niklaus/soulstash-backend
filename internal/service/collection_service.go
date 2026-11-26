@@ -43,6 +43,7 @@ type CollectionService interface {
 	GetCollectionMovies(ctx context.Context, userID, collectionID string) ([]any, error)
 	PublishCollection(ctx context.Context, userID, collectionID string, publish bool, clientVersion *int) (*CollectionMutationResult, error)
 	ReorderCollections(ctx context.Context, userID string, order []string, clientVersion *int) (*CollectionMutationResult, error)
+	EnrichMetadata(ctx context.Context, userID, collectionID string, items []map[string]any) (*CollectionMutationResult, error)
 	GetPublicProfile(ctx context.Context, currentUsername, targetUsername string) (map[string]any, error)
 	Follow(ctx context.Context, currentUsername, targetUsername string) error
 	Unfollow(ctx context.Context, currentUsername, targetUsername string) error
@@ -257,39 +258,34 @@ func (s *collectionService) AddMovie(ctx context.Context, userID, collectionID s
 		return nil, domain.NewAppError(domain.ErrNotFound, "Collection not found", 404)
 	}
 
+	tmdbID := extractIntField(movie, "id", "tmdbId", "tmdbID", "movieId", "seriesId", "contentId", "mediaId")
+	mediaType := resolveMediaTypeFromMap(movie)
+	if tmdbID > 0 {
+		if movie["id"] == nil || int(getFloat(movie["id"])) == 0 {
+			movie["id"] = tmdbID
+		}
+		if mType, _ := movie["media_type"].(string); strings.TrimSpace(mType) == "" {
+			movie["media_type"] = mediaType
+		}
+	}
+
 	// Enrich ratings if missing before storing
-	if s.ratingsSvc != nil {
-		tmdbID := int(getFloat(movie["id"]))
-		if tmdbID == 0 {
-			tmdbID = int(getFloat(movie["tmdbId"]))
-		}
-		if tmdbID == 0 {
-			tmdbID = int(getFloat(movie["tmdbID"]))
-		}
-		if tmdbID > 0 {
-			mediaType, _ := movie["media_type"].(string)
-			if mediaType == "" {
-				mediaType, _ = movie["mediaType"].(string)
-			}
-			if mediaType == "" {
-				mediaType, _ = movie["type"].(string)
-			}
+	if s.ratingsSvc != nil && tmdbID > 0 {
+		hasImdb := getFloat(movie["imdb_rating"]) > 0 && getFloat(movie["imdb_rating"]) < InvalidImdbSentinel
+		hasVote := getFloat(movie["vote_average"]) > 0 && getFloat(movie["vote_average"]) < InvalidImdbSentinel
+		if !hasImdb || !hasVote {
 			imdbID, _ := movie["imdb_id"].(string)
+			if imdbID == "" {
+				imdbID, _ = movie["imdbID"].(string)
+			}
 			var seedVoteAvg *float64
-			if va := getFloat(movie["vote_average"]); va > 0 {
+			if hasVote {
+				va := getFloat(movie["vote_average"])
 				seedVoteAvg = &va
 			}
 			rec, err := s.ratingsSvc.ResolveRating(ctx, tmdbID, mediaType, imdbID, seedVoteAvg)
 			if err == nil && rec != nil {
-				if rec.ImdbRating != nil && *rec.ImdbRating < InvalidImdbSentinel {
-					movie["imdb_rating"] = *rec.ImdbRating
-				}
-				if rec.ImdbID != "" {
-					movie["imdb_id"] = rec.ImdbID
-				}
-				if rec.VoteAverage != nil && (movie["vote_average"] == nil || getFloat(movie["vote_average"]) == 0) {
-					movie["vote_average"] = *rec.VoteAverage
-				}
+				applyRatingRecordToMovieMap(movie, rec)
 			}
 		}
 	}
@@ -463,6 +459,228 @@ func (s *collectionService) ReorderCollections(ctx context.Context, userID strin
 		StaleResolved:     stale,
 		Collections:       sanitizeCollections(reordered),
 	}, nil
+}
+
+func (s *collectionService) EnrichMetadata(ctx context.Context, userID, collectionID string, items []map[string]any) (*CollectionMutationResult, error) {
+	user, err := s.repo.GetUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	idx := findCollectionIndex(user.Collections, collectionID)
+	if idx == -1 {
+		return nil, domain.NewAppError(domain.ErrNotFound, "Collection not found", 404)
+	}
+
+	colMovies := user.Collections[idx].Movies
+	targets := items
+	if len(targets) == 0 {
+		for _, raw := range colMovies {
+			mMap := toMutableMovieMap(raw)
+			if mMap == nil {
+				continue
+			}
+			tid := extractIntField(mMap, "id", "tmdbId", "tmdbID", "movieId", "seriesId", "contentId", "mediaId")
+			if tid <= 0 {
+				continue
+			}
+			if movieNeedsRatingRefresh(mMap) {
+				targets = append(targets, mMap)
+			}
+		}
+	}
+
+	var resolvedItems []map[string]any
+	if s.ratingsSvc != nil && len(targets) > 0 {
+		resolvedItems = s.ratingsSvc.BatchEnrich(ctx, targets)
+	} else {
+		resolvedItems = targets
+	}
+
+	enrichedByCompositeKey := make(map[string]map[string]any, len(resolvedItems))
+	enrichedByID := make(map[int]map[string]any, len(resolvedItems))
+	for _, itm := range resolvedItems {
+		tid := extractIntField(itm, "tmdbID", "id", "tmdbId", "contentId", "movieId", "seriesId", "mediaId")
+		if tid <= 0 {
+			continue
+		}
+		mType := resolveMediaTypeFromMap(itm)
+		enrichedByCompositeKey[fmt.Sprintf("%s:%d", mType, tid)] = itm
+		if _, exists := enrichedByID[tid]; !exists {
+			enrichedByID[tid] = itm
+		}
+	}
+
+	changed := false
+	for i, raw := range colMovies {
+		mMap := toMutableMovieMap(raw)
+		if mMap == nil {
+			continue
+		}
+		tid := extractIntField(mMap, "id", "tmdbId", "tmdbID", "movieId", "seriesId", "contentId", "mediaId")
+		if tid <= 0 {
+			continue
+		}
+		mType := resolveMediaTypeFromMap(mMap)
+		enriched, ok := enrichedByCompositeKey[fmt.Sprintf("%s:%d", mType, tid)]
+		if !ok {
+			enriched, ok = enrichedByID[tid]
+		}
+		if !ok || enriched == nil {
+			continue
+		}
+
+		if applyResolvedRatingFields(mMap, tid, enriched) {
+			colMovies[i] = mMap
+			changed = true
+		}
+	}
+
+	if changed {
+		user.Collections[idx].Movies = colMovies
+		user.Collections[idx].MovieCount = len(colMovies)
+		user.Collections[idx].UpdatedAt = time.Now()
+		if err := s.repo.UpdateCollections(ctx, userID, user.Collections); err != nil {
+			return nil, err
+		}
+	}
+
+	nextVersion := user.CollectionVersion
+	if changed {
+		nextVersion++
+	}
+
+	return &CollectionMutationResult{
+		Message:           "Collection metadata updated",
+		CollectionVersion: nextVersion,
+		StaleResolved:     false,
+		Collections:       sanitizeCollections(user.Collections),
+		Extra: map[string]any{
+			"items":   resolvedItems,
+			"updated": changed,
+		},
+	}, nil
+}
+
+func toMutableMovieMap(raw any) map[string]any {
+	switch v := raw.(type) {
+	case map[string]any:
+		cp := make(map[string]any, len(v))
+		for k, val := range v {
+			cp[k] = val
+		}
+		return cp
+	case bson.M:
+		cp := make(map[string]any, len(v))
+		for k, val := range v {
+			cp[k] = val
+		}
+		return cp
+	case bson.D:
+		cp := make(map[string]any, len(v))
+		for _, elem := range v {
+			cp[elem.Key] = elem.Value
+		}
+		return cp
+	default:
+		return nil
+	}
+}
+
+func movieNeedsRatingRefresh(m map[string]any) bool {
+	hasImdb := getFloat(m["imdb_rating"]) > 0 && getFloat(m["imdb_rating"]) < InvalidImdbSentinel
+	hasVote := getFloat(m["vote_average"]) > 0 && getFloat(m["vote_average"]) < InvalidImdbSentinel
+	if hasImdb && hasVote {
+		return false
+	}
+	attempted, _ := m["rating_lookup_attempted"].(bool)
+	if !attempted {
+		return true
+	}
+	if !hasImdb {
+		if checkedStr, ok := m["rating_checked_at"].(string); ok && strings.TrimSpace(checkedStr) != "" {
+			if checkedAt, err := time.Parse(time.RFC3339, checkedStr); err == nil {
+				return time.Since(checkedAt) > SentinelRatingTTL
+			}
+		}
+	}
+	return false
+}
+
+func applyRatingRecordToMovieMap(movie map[string]any, rec *domain.RatingRecord) {
+	if movie == nil || rec == nil {
+		return
+	}
+	if existing := getFloat(movie["imdb_rating"]); existing >= InvalidImdbSentinel {
+		delete(movie, "imdb_rating")
+	}
+	if rec.ImdbRating != nil && *rec.ImdbRating > 0 && *rec.ImdbRating < InvalidImdbSentinel {
+		movie["imdb_rating"] = *rec.ImdbRating
+	}
+	if rec.ImdbID != "" {
+		movie["imdb_id"] = rec.ImdbID
+	}
+	if rec.VoteAverage != nil && *rec.VoteAverage > 0 && *rec.VoteAverage < InvalidImdbSentinel &&
+		(movie["vote_average"] == nil || getFloat(movie["vote_average"]) == 0 || getFloat(movie["vote_average"]) >= InvalidImdbSentinel) {
+		movie["vote_average"] = *rec.VoteAverage
+	}
+	movie["rating_lookup_attempted"] = rec.LookupAttempted
+	if !rec.UpdatedAt.IsZero() {
+		movie["rating_checked_at"] = rec.UpdatedAt.UTC().Format(time.RFC3339)
+	}
+}
+
+func applyResolvedRatingFields(dst map[string]any, tmdbID int, src map[string]any) bool {
+	changed := false
+	if tmdbID > 0 && (dst["id"] == nil || int(getFloat(dst["id"])) == 0) {
+		dst["id"] = tmdbID
+		changed = true
+	}
+	if cur := getFloat(dst["imdb_rating"]); cur >= InvalidImdbSentinel {
+		delete(dst, "imdb_rating")
+		changed = true
+	}
+	if nextImdb := getFloat(src["imdb_rating"]); nextImdb > 0 && nextImdb < InvalidImdbSentinel {
+		if getFloat(dst["imdb_rating"]) != nextImdb {
+			dst["imdb_rating"] = nextImdb
+			changed = true
+		}
+	}
+	if nextVote := getFloat(src["vote_average"]); nextVote > 0 && nextVote < InvalidImdbSentinel {
+		curVote := getFloat(dst["vote_average"])
+		if curVote <= 0 || curVote >= InvalidImdbSentinel {
+			dst["vote_average"] = nextVote
+			changed = true
+		}
+	}
+	nextImdbID, _ := src["imdb_id"].(string)
+	if nextImdbID == "" {
+		nextImdbID, _ = src["imdbID"].(string)
+	}
+	if strings.TrimSpace(nextImdbID) != "" {
+		curImdbID, _ := dst["imdb_id"].(string)
+		if strings.TrimSpace(curImdbID) == "" {
+			dst["imdb_id"] = strings.TrimSpace(nextImdbID)
+			changed = true
+		}
+	}
+	attempted, _ := src["rating_lookup_attempted"].(bool)
+	if !attempted {
+		attempted, _ = src["lookup_attempted"].(bool)
+	}
+	if attempted {
+		if curAttempted, _ := dst["rating_lookup_attempted"].(bool); !curAttempted {
+			dst["rating_lookup_attempted"] = true
+			changed = true
+		}
+	}
+	if checkedAt, _ := src["rating_checked_at"].(string); strings.TrimSpace(checkedAt) != "" {
+		if curChecked, _ := dst["rating_checked_at"].(string); curChecked != checkedAt {
+			dst["rating_checked_at"] = checkedAt
+			changed = true
+		}
+	}
+	return changed
 }
 
 func (s *collectionService) GetPublicProfile(ctx context.Context, currentUsername, targetUsername string) (map[string]any, error) {

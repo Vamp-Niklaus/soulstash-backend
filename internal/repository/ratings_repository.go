@@ -80,13 +80,14 @@ func (r *mongoRatingsRepo) UpsertRating(ctx context.Context, record *domain.Rati
 
 	update := bson.M{
 		"$set": bson.M{
-			"tmdbID":       record.TmdbID,
-			"mediaType":    record.MediaType,
-			"type":         record.MediaType,
-			"imdbID":       record.ImdbID,
-			"imdb_rating":  record.ImdbRating,
-			"vote_average": record.VoteAverage,
-			"updatedAt":    time.Now(),
+			"tmdbID":           record.TmdbID,
+			"mediaType":        record.MediaType,
+			"type":             record.MediaType,
+			"imdbID":           record.ImdbID,
+			"imdb_rating":      record.ImdbRating,
+			"vote_average":     record.VoteAverage,
+			"lookup_attempted": record.LookupAttempted,
+			"updatedAt":        time.Now(),
 		},
 		"$setOnInsert": bson.M{
 			"createdAt": time.Now(),

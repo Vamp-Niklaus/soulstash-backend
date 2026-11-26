@@ -3,7 +3,9 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -345,18 +347,25 @@ func (h *CollectionHandler) EnrichMetadata(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	cols, ver, err := h.svc.GetCollections(r.Context(), user.UserID)
+	colID := chi.URLParam(r, "id")
+	var body struct {
+		Items []map[string]any `json:"items"`
+	}
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, "Invalid request body")
+			return
+		}
+	}
+
+	res, err := h.svc.EnrichMetadata(r.Context(), user.UserID, colID, body.Items)
 	if err != nil {
 		handleServiceError(w, err)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"message":           "Collection metadata updated",
-		"collectionVersion": ver,
-		"staleResolved":     false,
-		"collections":       cols,
-	})
+	setCollectionHeaders(w, res.CollectionVersion, res.StaleResolved)
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (h *CollectionHandler) DetectAnime(w http.ResponseWriter, r *http.Request) {

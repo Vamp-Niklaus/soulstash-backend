@@ -3,7 +3,11 @@ package service
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -243,5 +247,136 @@ func TestRatingsService_CacheExpiration(t *testing.T) {
 	}
 	if stored.ImdbRating != nil {
 		t.Errorf("expected GetStoredRating sentinel to be filtered to nil, got %v", *stored.ImdbRating)
+	}
+}
+
+type mockTmdbForRatings struct {
+	calls atomic.Int32
+	data  map[string]map[string]any
+}
+
+func (m *mockTmdbForRatings) Get(ctx context.Context, endpoint string, queryParams map[string]string) (map[string]any, error) {
+	m.calls.Add(1)
+	if d, ok := m.data[endpoint]; ok {
+		return d, nil
+	}
+	return nil, nil
+}
+
+func (m *mockTmdbForRatings) GetRaw(ctx context.Context, endpoint string, queryParams map[string]string) ([]byte, error) {
+	return nil, nil
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func TestRatingsService_SentinelEmptyImdbID_And_OmdbExpiryFlow(t *testing.T) {
+	repo := newMockRatingsRepo()
+	tmdbMock := &mockTmdbForRatings{
+		data: map[string]map[string]any{
+			"/3/movie/402": {"imdb_id": "tt0000402", "vote_average": 6.8},
+			"/3/movie/403": {"imdb_id": "tt0000403", "vote_average": 7.9},
+			"/3/tv/555":    {"imdb_id": "tt0000555", "vote_average": 8.1},
+		},
+	}
+
+	var omdbCalls atomic.Int32
+	svc := NewRatingsService(repo, tmdbMock, "key1").(*ratingsService)
+	svc.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			omdbCalls.Add(1)
+			q := req.URL.Query().Get("i")
+			body := `{"Response":"False","Error":"Movie not found!"}`
+			if q == "tt0000403" || q == "tt0000555" {
+				body = `{"Response":"True","imdbRating":"8.3"}`
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(body)),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
+
+	// 1. Fresh 10.0 sentinel WITH empty ImdbID must still return from cache without hitting TMDB/OMDb
+	sentinel := InvalidImdbSentinel
+	repo.ratings["401_Movie"] = &domain.RatingRecord{
+		TmdbID:     401,
+		MediaType:  "Movie",
+		Type:       "Movie",
+		ImdbID:     "",
+		ImdbRating: &sentinel,
+		UpdatedAt:  time.Now().Add(-2 * 24 * time.Hour),
+	}
+	res1, err := svc.ResolveRating(context.Background(), 401, "Movie", "", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res1.Source != "cache" || res1.ImdbRating != nil || tmdbMock.calls.Load() != 0 || omdbCalls.Load() != 0 {
+		t.Fatalf("expected cache hit with 0 external calls, got source=%s tmdb=%d omdb=%d", res1.Source, tmdbMock.calls.Load(), omdbCalls.Load())
+	}
+
+	// 2. Expired 10.0 sentinel where OMDb still says not found -> calls OMDb once, updates MongoDB UpdatedAt to now, then subsequent check skips OMDb
+	repo.ratings["402_Movie"] = &domain.RatingRecord{
+		TmdbID:     402,
+		MediaType:  "Movie",
+		Type:       "Movie",
+		ImdbID:     "",
+		ImdbRating: &sentinel,
+		UpdatedAt:  time.Now().Add(-20 * 24 * time.Hour),
+	}
+	res2, err := svc.ResolveRating(context.Background(), 402, "Movie", "", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if omdbCalls.Load() != 1 || res2.ImdbRating != nil {
+		t.Fatalf("expected 1 omdb call and nil rating, got omdb=%d rating=%v", omdbCalls.Load(), res2.ImdbRating)
+	}
+	stored402 := repo.ratings["402_Movie"]
+	if stored402 == nil || stored402.ImdbRating == nil || *stored402.ImdbRating != InvalidImdbSentinel || time.Since(stored402.UpdatedAt) > time.Minute {
+		t.Fatalf("expected fresh 10.0 sentinel stored in MongoDB, got %+v", stored402)
+	}
+
+	// Repeat check immediately: must hit fresh 10.0 in MongoDB and NOT call OMDb again
+	res2Again, err := svc.ResolveRating(context.Background(), 402, "Movie", "", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res2Again.Source != "cache" || omdbCalls.Load() != 1 {
+		t.Fatalf("expected repeat lookup to serve from cache without OMDb call, got source=%s omdb=%d", res2Again.Source, omdbCalls.Load())
+	}
+
+	// 3. Expired 10.0 sentinel where OMDb now finds a valid rating -> updates MongoDB with found rating
+	repo.ratings["403_Movie"] = &domain.RatingRecord{
+		TmdbID:     403,
+		MediaType:  "Movie",
+		Type:       "Movie",
+		ImdbID:     "tt0000403",
+		ImdbRating: &sentinel,
+		UpdatedAt:  time.Now().Add(-15 * 24 * time.Hour),
+	}
+	res3, err := svc.ResolveRating(context.Background(), 403, "Movie", "", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res3.ImdbRating == nil || *res3.ImdbRating != 8.3 {
+		t.Fatalf("expected 8.3 rating after OMDb lookup, got %v", res3.ImdbRating)
+	}
+	if repo.ratings["403_Movie"].ImdbRating == nil || *repo.ratings["403_Movie"].ImdbRating != 8.3 {
+		t.Fatalf("expected MongoDB cache updated to 8.3")
+	}
+
+	// 4. BatchEnrich supports seriesId / movieId drawer payloads
+	enriched := svc.BatchEnrich(context.Background(), []map[string]any{
+		{"seriesId": 555, "title": "Show 555"},
+	})
+	if len(enriched) != 1 || enriched[0]["mediaType"] != "Series" || enriched[0]["tmdbID"] != 555 {
+		t.Fatalf("unexpected BatchEnrich result: %+v", enriched)
+	}
+	if r, ok := enriched[0]["imdb_rating"].(*float64); !ok || r == nil || *r != 8.3 {
+		t.Fatalf("expected BatchEnrich imdb_rating 8.3, got %#v", enriched[0]["imdb_rating"])
 	}
 }
